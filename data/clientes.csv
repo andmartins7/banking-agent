@@ -1,0 +1,6 @@
+cpf,nome,data_nascimento,score_credito,limite_credito
+12345678901,João Silva,15/03/1985,750,5000.0
+98765432100,Maria Oliveira,22/07/1990,420,1500.0
+11122233344,Carlos Mendes,08/11/1978,600,3000.0
+55566677788,Ana Souza,30/01/1995,850,20000.0
+99988877766,Pedro Costa,14/06/1982,300,500.0
