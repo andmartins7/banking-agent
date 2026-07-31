@@ -242,7 +242,7 @@ banking-agent/
 │   ├── clientes.csv            # Base de clientes
 │   ├── score_limite.csv        # Tabela de faixas de limite
 │   └── solicitacoes_aumento_limite.csv
-├── .kiro/specs/                # Specs do projeto (spec-driven development)
+├── specs/                      # Specs do projeto (spec-driven development)
 ├── app.py                      # Interface Streamlit
 ├── orchestrator.py             # Runner ADK + funções de sessão
 ├── config.py                   # Configurações centralizadas

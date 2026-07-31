@@ -50,8 +50,7 @@ O sistema implementa um padrão de **orquestração multi-agente com handoff imp
 
 ```
 banking-agent/
-├── .kiro/
-│   └── specs/                  # Specs do projeto
+├── specs/                      # Specs do projeto
 ├── agents/
 │   ├── __init__.py
 │   ├── triagem.py              # Agente de Triagem
