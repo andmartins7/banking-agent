@@ -71,7 +71,7 @@ Chama: registrar_solicitacao(novo_limite, tool_context)
             │       ├── atualizar_limite_cliente(novo_limite, tool_context)
             │       └── comunica o novo limite
             │
-            └── REJEITADO
+            └── REJEITADO (`erro=None`, inclusive sem faixa de cobertura)
                     ├── atualizar_status_solicitacao(data_hora, "rejeitado", tool_context)
                     └── comunica a decisão sem expor score ou faixa e oferece entrevista
 ```
@@ -209,7 +209,8 @@ def checar_score_para_limite(
 2. Revalidar o novo limite com a mesma regra determinística do registro.
 3. Ordenar `score_limite.csv` por `limite_maximo` crescente e usar a primeira faixa que cobre o valor.
 4. Comparar o score persistido com `score_minimo`, sem expor o score ao modelo.
-5. Se nenhuma faixa cobrir o valor, retornar `aprovado=False`, `limite_coberto=False` e erro controlado; nunca reutilizar automaticamente a última faixa.
+5. Se nenhuma faixa cobrir um limite válido, retornar `aprovado=False`, `limite_coberto=False` e `erro=None`; essa rejeição de negócio permite finalizar a solicitação como `rejeitado` e nunca reutiliza automaticamente a última faixa.
+6. Representar separadamente falhas técnicas da tabela com `erro != None`; nesses casos, não finalizar a solicitação.
 
 ---
 
@@ -322,7 +323,7 @@ agente_credito = Agent(
 | CSV de solicitações não existe | `registrar_solicitacao` cria o arquivo somente após validar o valor |
 | Novo limite nulo, booleano, não numérico, não finito ou ≤ 0 | Ferramenta retorna `registrado=False` sem criar ou modificar o CSV |
 | Novo limite ≤ limite atual | Ferramenta rejeita deterministicamente e o agente solicita novo valor |
-| Novo limite fora da cobertura de `score_limite.csv` | Análise retorna `aprovado=False`, `limite_coberto=False` e não finaliza o status |
+| Novo limite válido fora da cobertura de `score_limite.csv` | Rejeição de negócio com `aprovado=False`, `limite_coberto=False` e `erro=None`; status transita de `pendente` para `rejeitado` |
 | `score_limite.csv` não encontrado | Ferramenta retorna `erro`; agente informa instabilidade temporária |
 | `novo_limite` não é número válido | Agente pede para informar um valor numérico (ex: "5000" ou "5000.00") |
 | `clientes.csv` corrompido na atualização | Ferramenta retorna `erro`; agente informa e sugere tentar novamente |
@@ -339,7 +340,7 @@ agente_credito = Agent(
 - [ ] Novo limite igual ou menor que o atual é rejeitado pela tool com mensagem controlada.
 - [ ] Solicitação é registrada em CSV com status `'pendente'` antes da checagem.
 - [ ] Timestamp do registro usa ISO 8601 UTC com microssegundos e offset explícito.
-- [ ] Limite fora da cobertura da tabela é rejeitado sem usar a última faixa como fallback.
+- [ ] Limite válido fora da cobertura da tabela é rejeitado sem erro técnico, finaliza o status como `'rejeitado'` e não usa a última faixa como fallback.
 - [ ] Score suficiente → status atualizado para `'aprovado'` + `clientes.csv` atualizado.
 - [ ] Score insuficiente → status atualizado para `'rejeitado'`.
 - [ ] Somente `pendente → aprovado` e `pendente → rejeitado` são permitidas.

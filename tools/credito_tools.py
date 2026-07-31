@@ -325,9 +325,13 @@ def checar_score_para_limite(
         ]
 
         if faixa.empty:
-            return _resultado_analise_erro(
-                "O novo limite está fora da cobertura da tabela de score."
-            )
+            return {
+                "aprovado": False,
+                "score_minimo_necessario": None,
+                "limite_maximo_faixa": None,
+                "limite_coberto": False,
+                "erro": None,
+            }
 
         faixa_aplicavel = faixa.iloc[0]
         score_minimo = int(faixa_aplicavel["score_minimo"])

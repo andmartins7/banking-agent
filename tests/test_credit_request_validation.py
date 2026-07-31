@@ -210,7 +210,7 @@ class CreditRequestValidationTests(unittest.TestCase):
         self.assertFalse(resultado["aprovado"])
         self.assertFalse(resultado["limite_coberto"])
         self.assertIsNone(resultado["score_minimo_necessario"])
-        self.assertIsNotNone(resultado["erro"])
+        self.assertIsNone(resultado["erro"])
 
     def test_17_score_insuficiente_rejeita(self):
         resultado = checar_score_para_limite(8000.0, tool_context=self.context)
@@ -339,7 +339,7 @@ class CreditRequestValidationTests(unittest.TestCase):
         self._write_solicitacoes([self._row_solicitacao()])
         resultados = [
             registrar_solicitacao(0, tool_context=self.context),
-            checar_score_para_limite(12000.0, tool_context=self.context),
+            checar_score_para_limite(0, tool_context=self.context),
             atualizar_status_solicitacao(
                 "inexistente", "aprovado", tool_context=self.context
             ),
@@ -367,6 +367,58 @@ class CreditRequestValidationTests(unittest.TestCase):
 
         depois = {path: self._hash(path) for path in caminhos}
         self.assertEqual(antes, depois)
+
+    def test_30_limite_sem_faixa_finaliza_como_rejeitado(self):
+        registro = self._registrar(12000.0)
+        antes = self._read_csv(self.solicitacoes_path)
+
+        self.assertTrue(registro["registrado"])
+        self.assertEqual("pendente", antes[0]["status_pedido"])
+
+        analise = checar_score_para_limite(
+            12000.0,
+            tool_context=self.context,
+        )
+
+        self.assertFalse(analise["aprovado"])
+        self.assertFalse(analise["limite_coberto"])
+        self.assertIsNone(analise["erro"])
+
+        atualizacao = atualizar_status_solicitacao(
+            registro["data_hora"],
+            "rejeitado",
+            tool_context=self.context,
+        )
+
+        depois = self._read_csv(self.solicitacoes_path)
+        self.assertTrue(atualizacao["atualizado"])
+        self.assertEqual("rejeitado", depois[0]["status_pedido"])
+
+    def test_31_tabela_de_score_ausente_continua_erro_tecnico(self):
+        self.score_path.unlink()
+
+        resultado = checar_score_para_limite(
+            2500.0,
+            tool_context=self.context,
+        )
+
+        self.assertFalse(resultado["aprovado"])
+        self.assertIsNotNone(resultado["erro"])
+
+    def test_32_tabela_de_score_malformada_continua_erro_tecnico(self):
+        self._write_csv(
+            self.score_path,
+            ["coluna_invalida"],
+            [{"coluna_invalida": "1"}],
+        )
+
+        resultado = checar_score_para_limite(
+            2500.0,
+            tool_context=self.context,
+        )
+
+        self.assertFalse(resultado["aprovado"])
+        self.assertIsNotNone(resultado["erro"])
 
 
 if __name__ == "__main__":

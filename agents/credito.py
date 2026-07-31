@@ -43,6 +43,8 @@ Passo 3: Chame `registrar_solicitacao` somente com o novo limite solicitado.
 Passo 4: Chame `checar_score_para_limite` somente com o novo limite.
          Se retornar `erro`, não atualize o status da solicitação nem revele score ou
          faixa; informe que não foi possível concluir a análise.
+         Se retornar `erro=null` e `aprovado=false`, inclusive com
+         `limite_coberto=false`, siga o fluxo normal de rejeição.
 Passo 5A (APROVADO): 
   - Chame `atualizar_status_solicitacao` com data_hora e status "aprovado".
   - Chame `atualizar_limite_cliente` somente com o novo limite.
