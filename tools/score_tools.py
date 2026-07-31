@@ -7,6 +7,8 @@ Funções expostas como tools do Google ADK:
 """
 
 import pandas as pd
+from google.adk.tools.tool_context import ToolContext
+
 from config import (
     CSV_CLIENTES,
     PESO_RENDA,
@@ -16,6 +18,7 @@ from config import (
     SCORE_MIN,
     SCORE_MAX,
 )
+from session_state import ErroAutorizacaoSessao, obter_cpf_autorizado
 
 
 # ── Helpers de normalização ────────────────────────────────────────────────
@@ -63,6 +66,7 @@ def calcular_score(
     despesas_fixas: float,
     num_dependentes: int,
     tem_dividas: str,
+    tool_context: ToolContext,
 ) -> dict:
     """
     Calcula o novo score de crédito com base nos dados financeiros coletados na entrevista.
@@ -80,6 +84,7 @@ def calcular_score(
         despesas_fixas: Despesas fixas mensais em R$ (>= 0).
         num_dependentes: Número de dependentes financeiros (>= 0).
         tem_dividas: Se possui dívidas ativas — normalizado internamente.
+        tool_context: Contexto ADK da sessão autenticada.
 
     Returns:
         dict com:
@@ -87,6 +92,15 @@ def calcular_score(
             detalhes (dict): componentes do cálculo (uso interno/debug).
             erro (str | None).
     """
+    try:
+        obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return {
+            "score": SCORE_MIN,
+            "detalhes": {},
+            "erro": str(e),
+        }
+
     try:
         # Normalizar inputs
         emprego_key   = _normalizar_tipo_emprego(str(tipo_emprego))
@@ -119,7 +133,7 @@ def calcular_score(
         }
 
     except Exception as e:
-        print(f"[TOOL ERROR] calcular_score: {type(e).__name__}: {e}")
+        print(f"[TOOL ERROR] calcular_score: {type(e).__name__}")
         return {
             "score": SCORE_MIN,
             "detalhes": {},
@@ -127,13 +141,16 @@ def calcular_score(
         }
 
 
-def atualizar_score_cliente(cpf: str, novo_score: int) -> dict:
+def atualizar_score_cliente(
+    novo_score: int,
+    tool_context: ToolContext,
+) -> dict:
     """
     Atualiza o score de crédito do cliente em clientes.csv.
 
     Args:
-        cpf: CPF do cliente (normalizado, 11 dígitos).
         novo_score: Novo score calculado (0-1000).
+        tool_context: Contexto ADK da sessão autenticada.
 
     Returns:
         dict com:
@@ -143,17 +160,27 @@ def atualizar_score_cliente(cpf: str, novo_score: int) -> dict:
             erro (str | None).
     """
     try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return {
+            "atualizado": False,
+            "score_anterior": 0,
+            "score_novo": 0,
+            "erro": str(e),
+        }
+
+    try:
         df = pd.read_csv(CSV_CLIENTES, dtype=str)
         df.columns = df.columns.str.strip()
         df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
 
-        mascara = df["cpf"] == cpf.strip()
+        mascara = df["cpf"] == cpf
         if not mascara.any():
             return {
                 "atualizado": False,
                 "score_anterior": 0,
                 "score_novo": 0,
-                "erro": f"Cliente com CPF {cpf} não encontrado.",
+                "erro": "Cliente autenticado não encontrado.",
             }
 
         score_anterior = int(df.loc[mascara, "score_credito"].iloc[0])
@@ -178,7 +205,7 @@ def atualizar_score_cliente(cpf: str, novo_score: int) -> dict:
             "erro": "Base de clientes não encontrada.",
         }
     except Exception as e:
-        print(f"[TOOL ERROR] atualizar_score_cliente: {type(e).__name__}: {e}")
+        print(f"[TOOL ERROR] atualizar_score_cliente: {type(e).__name__}")
         return {
             "atualizado": False,
             "score_anterior": 0,
