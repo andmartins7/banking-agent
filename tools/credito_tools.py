@@ -9,6 +9,7 @@ Funções expostas como tools do Google ADK:
     - atualizar_limite_cliente
 """
 
+import math
 import pandas as pd
 from datetime import datetime, timezone
 from google.adk.tools.tool_context import ToolContext
@@ -18,6 +19,111 @@ from session_state import ErroAutorizacaoSessao, obter_cpf_autorizado
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+class _ErroValidacaoLimite(ValueError):
+    """Falha controlada na validação monetária de uma solicitação."""
+
+
+class _ErroTransicaoStatus(ValueError):
+    """Falha controlada na normalização do status final solicitado."""
+
+
+def _validar_novo_limite(novo_limite: object, limite_atual: float) -> float:
+    """Retorna o valor validado quando ele é finito e supera o limite atual."""
+    if novo_limite is None or isinstance(novo_limite, bool):
+        raise _ErroValidacaoLimite(
+            "O novo limite deve ser um valor numérico finito e maior que zero."
+        )
+
+    try:
+        valor = float(novo_limite)
+        atual = float(limite_atual)
+    except (TypeError, ValueError) as e:
+        raise _ErroValidacaoLimite(
+            "O novo limite deve ser um valor numérico finito e maior que zero."
+        ) from e
+
+    if not math.isfinite(valor) or valor <= 0:
+        raise _ErroValidacaoLimite(
+            "O novo limite deve ser um valor numérico finito e maior que zero."
+        )
+    if not math.isfinite(atual) or atual < 0:
+        raise _ErroValidacaoLimite(
+            "Não foi possível validar o limite atual do cliente."
+        )
+    if valor <= atual:
+        raise _ErroValidacaoLimite(
+            "O novo limite deve ser maior que o limite atual."
+        )
+
+    return valor
+
+
+def _agora_utc() -> datetime:
+    """Retorna o relógio UTC; separado para permitir controle nos testes."""
+    return datetime.now(timezone.utc)
+
+
+def _gerar_timestamp_utc() -> str:
+    """Gera timestamp ISO 8601 UTC com offset e microssegundos explícitos."""
+    instante = _agora_utc()
+    if instante.tzinfo is None or instante.utcoffset() is None:
+        instante = instante.replace(tzinfo=timezone.utc)
+    else:
+        instante = instante.astimezone(timezone.utc)
+    return instante.isoformat(timespec="microseconds")
+
+
+def _normalizar_status_final(novo_status: object) -> str:
+    """Normaliza somente os estados finais aceitos pela máquina de estados."""
+    if not isinstance(novo_status, str):
+        raise _ErroTransicaoStatus(
+            "O status deve ser 'aprovado' ou 'rejeitado'."
+        )
+
+    normalizado = novo_status.strip().lower()
+    if normalizado == "reprovado":
+        normalizado = "rejeitado"
+    if normalizado not in {"aprovado", "rejeitado"}:
+        raise _ErroTransicaoStatus(
+            "O status deve ser 'aprovado' ou 'rejeitado'."
+        )
+    return normalizado
+
+
+def _resultado_registro_erro(mensagem: str) -> dict:
+    return {
+        "registrado": False,
+        "data_hora": "",
+        "limite_atual": None,
+        "novo_limite_solicitado": None,
+        "status_pedido": None,
+        "erro": mensagem,
+    }
+
+
+def _resultado_analise_erro(mensagem: str) -> dict:
+    return {
+        "aprovado": False,
+        "score_minimo_necessario": None,
+        "limite_maximo_faixa": None,
+        "limite_coberto": False,
+        "erro": mensagem,
+    }
+
+
+def _resultado_status_erro(
+    mensagem: str,
+    *,
+    status_anterior: str | None = None,
+    status_novo: str | None = None,
+) -> dict:
+    return {
+        "atualizado": False,
+        "status_anterior": status_anterior,
+        "status_novo": status_novo,
+        "erro": mensagem,
+    }
 
 def _garantir_csv_solicitacoes() -> None:
     """Cria o CSV de solicitações com cabeçalho se ainda não existir."""
@@ -111,7 +217,7 @@ def registrar_solicitacao(
     try:
         cpf = obter_cpf_autorizado(tool_context)
     except ErroAutorizacaoSessao as e:
-        return {"data_hora": "", "erro": str(e)}
+        return _resultado_registro_erro(str(e))
 
     try:
         clientes = pd.read_csv(CSV_CLIENTES, dtype=str)
@@ -119,40 +225,47 @@ def registrar_solicitacao(
         clientes = clientes.map(lambda x: x.strip() if isinstance(x, str) else x)
         linha_cliente = clientes[clientes["cpf"] == cpf]
         if linha_cliente.empty:
-            return {
-                "data_hora": "",
-                "erro": "Cliente autenticado não encontrado.",
-            }
+            return _resultado_registro_erro(
+                "Cliente autenticado não encontrado."
+            )
 
         limite_atual = float(linha_cliente.iloc[0]["limite_credito"])
+        try:
+            novo_limite = _validar_novo_limite(
+                novo_limite_solicitado,
+                limite_atual,
+            )
+        except _ErroValidacaoLimite as e:
+            return _resultado_registro_erro(str(e))
+
         _garantir_csv_solicitacoes()
 
-        data_hora = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        data_hora = _gerar_timestamp_utc()
 
         nova_linha = pd.DataFrame([{
             "cpf_cliente": cpf,
             "data_hora_solicitacao": data_hora,
             "limite_atual": float(limite_atual),
-            "novo_limite_solicitado": float(novo_limite_solicitado),
+            "novo_limite_solicitado": novo_limite,
             "status_pedido": "pendente",
         }])
 
         nova_linha.to_csv(CSV_SOLICITACOES, mode="a", header=False, index=False)
 
         return {
+            "registrado": True,
             "data_hora": data_hora,
             "limite_atual": limite_atual,
-            "novo_limite_solicitado": float(novo_limite_solicitado),
+            "novo_limite_solicitado": novo_limite,
             "status_pedido": "pendente",
             "erro": None,
         }
 
     except Exception as e:
         print(f"[TOOL ERROR] registrar_solicitacao: {type(e).__name__}")
-        return {
-            "data_hora": "",
-            "erro": "Erro ao registrar solicitação. Tente novamente.",
-        }
+        return _resultado_registro_erro(
+            "Erro ao registrar solicitação. Tente novamente."
+        )
 
 
 def checar_score_para_limite(
@@ -178,11 +291,7 @@ def checar_score_para_limite(
     try:
         cpf = obter_cpf_autorizado(tool_context)
     except ErroAutorizacaoSessao as e:
-        return {
-            "aprovado": False,
-            "score_minimo_necessario": 1000,
-            "erro": str(e),
-        }
+        return _resultado_analise_erro(str(e))
 
     try:
         clientes = pd.read_csv(CSV_CLIENTES, dtype=str)
@@ -190,12 +299,19 @@ def checar_score_para_limite(
         clientes = clientes.map(lambda x: x.strip() if isinstance(x, str) else x)
         linha_cliente = clientes[clientes["cpf"] == cpf]
         if linha_cliente.empty:
-            return {
-                "aprovado": False,
-                "score_minimo_necessario": 1000,
-                "erro": "Cliente autenticado não encontrado.",
-            }
-        score_cliente = int(linha_cliente.iloc[0]["score_credito"])
+            return _resultado_analise_erro(
+                "Cliente autenticado não encontrado."
+            )
+        row_cliente = linha_cliente.iloc[0]
+        score_cliente = int(row_cliente["score_credito"])
+        limite_atual = float(row_cliente["limite_credito"])
+        try:
+            novo_limite_validado = _validar_novo_limite(
+                novo_limite,
+                limite_atual,
+            )
+        except _ErroValidacaoLimite as e:
+            return _resultado_analise_erro(str(e))
 
         df = pd.read_csv(CSV_SCORE_LIMITE, dtype=str)
         df.columns = df.columns.str.strip()
@@ -204,35 +320,36 @@ def checar_score_para_limite(
 
         # Ordenar crescente e buscar primeira faixa que cobre o novo limite
         df_sorted = df.sort_values("limite_maximo").reset_index(drop=True)
-        faixa = df_sorted[df_sorted["limite_maximo"] >= float(novo_limite)]
+        faixa = df_sorted[
+            df_sorted["limite_maximo"] >= novo_limite_validado
+        ]
 
         if faixa.empty:
-            # Novo limite excede todas as faixas — usar o score mínimo da última faixa
-            score_minimo = int(df_sorted.iloc[-1]["score_minimo"])
-        else:
-            score_minimo = int(faixa.iloc[0]["score_minimo"])
+            return _resultado_analise_erro(
+                "O novo limite está fora da cobertura da tabela de score."
+            )
+
+        faixa_aplicavel = faixa.iloc[0]
+        score_minimo = int(faixa_aplicavel["score_minimo"])
+        limite_maximo_faixa = float(faixa_aplicavel["limite_maximo"])
 
         aprovado = score_cliente >= score_minimo
 
         return {
             "aprovado": aprovado,
             "score_minimo_necessario": score_minimo,
+            "limite_maximo_faixa": limite_maximo_faixa,
+            "limite_coberto": True,
             "erro": None,
         }
 
     except FileNotFoundError:
-        return {
-            "aprovado": False,
-            "score_minimo_necessario": 1000,
-            "erro": "Tabela de score não encontrada.",
-        }
+        return _resultado_analise_erro("Tabela de score não encontrada.")
     except Exception as e:
         print(f"[TOOL ERROR] checar_score_para_limite: {type(e).__name__}")
-        return {
-            "aprovado": False,
-            "score_minimo_necessario": 1000,
-            "erro": "Erro ao verificar score. Tente novamente.",
-        }
+        return _resultado_analise_erro(
+            "Erro ao verificar score. Tente novamente."
+        )
 
 
 def atualizar_status_solicitacao(
@@ -256,7 +373,12 @@ def atualizar_status_solicitacao(
     try:
         cpf = obter_cpf_autorizado(tool_context)
     except ErroAutorizacaoSessao as e:
-        return {"atualizado": False, "erro": str(e)}
+        return _resultado_status_erro(str(e))
+
+    try:
+        status_final = _normalizar_status_final(novo_status)
+    except _ErroTransicaoStatus as e:
+        return _resultado_status_erro(str(e))
 
     try:
         _garantir_csv_solicitacoes()
@@ -267,26 +389,53 @@ def atualizar_status_solicitacao(
 
         mascara = (
             (df["cpf_cliente"] == cpf) &
-            (df["data_hora_solicitacao"] == data_hora_solicitacao.strip())
+            (
+                df["data_hora_solicitacao"]
+                == str(data_hora_solicitacao or "").strip()
+            )
         )
 
-        if not mascara.any():
-            return {
-                "atualizado": False,
-                "erro": "Solicitação do cliente autenticado não encontrada.",
-            }
+        quantidade = int(mascara.sum())
+        if quantidade == 0:
+            return _resultado_status_erro(
+                "Solicitação do cliente autenticado não encontrada."
+            )
+        if quantidade > 1:
+            return _resultado_status_erro(
+                "Erro de integridade: mais de uma solicitação encontrada."
+            )
 
-        df.loc[mascara, "status_pedido"] = novo_status
+        status_anterior = str(
+            df.loc[mascara, "status_pedido"].iloc[0]
+        ).strip().lower()
+        if status_anterior not in {"pendente", "aprovado", "rejeitado"}:
+            return _resultado_status_erro(
+                "A solicitação possui status persistido inválido.",
+                status_anterior=status_anterior,
+                status_novo=status_final,
+            )
+        if status_anterior != "pendente":
+            return _resultado_status_erro(
+                "A solicitação já foi finalizada e não pode ser reprocessada.",
+                status_anterior=status_anterior,
+                status_novo=status_final,
+            )
+
+        df.loc[mascara, "status_pedido"] = status_final
         df.to_csv(CSV_SOLICITACOES, index=False)
 
-        return {"atualizado": True, "erro": None}
+        return {
+            "atualizado": True,
+            "status_anterior": status_anterior,
+            "status_novo": status_final,
+            "erro": None,
+        }
 
     except Exception as e:
         print(f"[TOOL ERROR] atualizar_status_solicitacao: {type(e).__name__}")
-        return {
-            "atualizado": False,
-            "erro": "Erro ao atualizar status da solicitação.",
-        }
+        return _resultado_status_erro(
+            "Erro ao atualizar status da solicitação."
+        )
 
 
 def atualizar_limite_cliente(
