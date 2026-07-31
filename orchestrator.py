@@ -16,6 +16,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 
 from config import GOOGLE_API_KEY, APP_NAME
+from session_state import CONVERSATION_ENDED, criar_estado_inicial
 
 load_dotenv()
 
@@ -97,6 +98,7 @@ def criar_sessao(session_id: str) -> None:
             app_name=APP_NAME,
             user_id=session_id,
             session_id=session_id,
+            state=criar_estado_inicial(),
         )
     )
 
@@ -151,7 +153,7 @@ def sessao_encerrada(session_id: str) -> bool:
         )
         if session is None:
             return False
-        return bool(session.state.get("conversation_ended", False))
+        return bool(session.state.get(CONVERSATION_ENDED, False))
     except Exception as e:
         print(f"[ERRO sessao_encerrada] session={session_id} | {e}")
         return False

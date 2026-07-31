@@ -11,7 +11,10 @@ Funções expostas como tools do Google ADK:
 
 import pandas as pd
 from datetime import datetime, timezone
+from google.adk.tools.tool_context import ToolContext
+
 from config import CSV_CLIENTES, CSV_SCORE_LIMITE, CSV_SOLICITACOES
+from session_state import ErroAutorizacaoSessao, obter_cpf_autorizado
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -32,12 +35,9 @@ def _garantir_csv_solicitacoes() -> None:
 
 # ── Tools ──────────────────────────────────────────────────────────────────
 
-def consultar_limite(cpf: str) -> dict:
+def consultar_limite(tool_context: ToolContext) -> dict:
     """
     Consulta o limite de crédito atual e o score do cliente.
-
-    Args:
-        cpf: CPF do cliente (11 dígitos, sem formatação).
 
     Returns:
         dict com:
@@ -45,6 +45,15 @@ def consultar_limite(cpf: str) -> dict:
             score_credito (int): score de crédito atual (0-1000).
             erro (str | None): mensagem de erro se houver.
     """
+    try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return {
+            "limite_atual": 0.0,
+            "score_credito": 0,
+            "erro": str(e),
+        }
+
     try:
         df = pd.read_csv(CSV_CLIENTES, dtype=str)
         df.columns = df.columns.str.strip()
@@ -55,7 +64,7 @@ def consultar_limite(cpf: str) -> dict:
             return {
                 "limite_atual": 0.0,
                 "score_credito": 0,
-                "erro": f"Cliente com CPF {cpf} não encontrado.",
+                "erro": "Cliente autenticado não encontrado.",
             }
 
         row = linha.iloc[0]
@@ -72,7 +81,7 @@ def consultar_limite(cpf: str) -> dict:
             "erro": "Base de clientes não encontrada.",
         }
     except Exception as e:
-        print(f"[TOOL ERROR] consultar_limite: {type(e).__name__}: {e}")
+        print(f"[TOOL ERROR] consultar_limite: {type(e).__name__}")
         return {
             "limite_atual": 0.0,
             "score_credito": 0,
@@ -81,10 +90,8 @@ def consultar_limite(cpf: str) -> dict:
 
 
 def registrar_solicitacao(
-    cpf: str,
-    limite_atual: float,
     novo_limite_solicitado: float,
-    status_pedido: str = "pendente",
+    tool_context: ToolContext,
 ) -> dict:
     """
     Registra uma solicitação de aumento de limite no CSV de solicitações.
@@ -93,10 +100,8 @@ def registrar_solicitacao(
     Sempre faz append — preserva histórico de solicitações.
 
     Args:
-        cpf: CPF do cliente.
-        limite_atual: Limite de crédito atual do cliente.
         novo_limite_solicitado: Novo limite desejado pelo cliente.
-        status_pedido: Status inicial da solicitação (padrão: 'pendente').
+        tool_context: Contexto ADK da sessão autenticada.
 
     Returns:
         dict com:
@@ -104,31 +109,56 @@ def registrar_solicitacao(
             erro (str | None).
     """
     try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return {"data_hora": "", "erro": str(e)}
+
+    try:
+        clientes = pd.read_csv(CSV_CLIENTES, dtype=str)
+        clientes.columns = clientes.columns.str.strip()
+        clientes = clientes.map(lambda x: x.strip() if isinstance(x, str) else x)
+        linha_cliente = clientes[clientes["cpf"] == cpf]
+        if linha_cliente.empty:
+            return {
+                "data_hora": "",
+                "erro": "Cliente autenticado não encontrado.",
+            }
+
+        limite_atual = float(linha_cliente.iloc[0]["limite_credito"])
         _garantir_csv_solicitacoes()
 
         data_hora = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
         nova_linha = pd.DataFrame([{
-            "cpf_cliente": cpf.strip(),
+            "cpf_cliente": cpf,
             "data_hora_solicitacao": data_hora,
             "limite_atual": float(limite_atual),
             "novo_limite_solicitado": float(novo_limite_solicitado),
-            "status_pedido": status_pedido,
+            "status_pedido": "pendente",
         }])
 
         nova_linha.to_csv(CSV_SOLICITACOES, mode="a", header=False, index=False)
 
-        return {"data_hora": data_hora, "erro": None}
+        return {
+            "data_hora": data_hora,
+            "limite_atual": limite_atual,
+            "novo_limite_solicitado": float(novo_limite_solicitado),
+            "status_pedido": "pendente",
+            "erro": None,
+        }
 
     except Exception as e:
-        print(f"[TOOL ERROR] registrar_solicitacao: {type(e).__name__}: {e}")
+        print(f"[TOOL ERROR] registrar_solicitacao: {type(e).__name__}")
         return {
             "data_hora": "",
             "erro": "Erro ao registrar solicitação. Tente novamente.",
         }
 
 
-def checar_score_para_limite(score_cliente: int, novo_limite: float) -> dict:
+def checar_score_para_limite(
+    novo_limite: float,
+    tool_context: ToolContext,
+) -> dict:
     """
     Verifica se o score do cliente é suficiente para o novo limite solicitado.
 
@@ -136,8 +166,8 @@ def checar_score_para_limite(score_cliente: int, novo_limite: float) -> dict:
     e compara com o score atual do cliente.
 
     Args:
-        score_cliente: Score de crédito atual do cliente (0-1000).
         novo_limite: Novo limite de crédito solicitado em R$.
+        tool_context: Contexto ADK da sessão autenticada.
 
     Returns:
         dict com:
@@ -146,6 +176,27 @@ def checar_score_para_limite(score_cliente: int, novo_limite: float) -> dict:
             erro (str | None).
     """
     try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return {
+            "aprovado": False,
+            "score_minimo_necessario": 1000,
+            "erro": str(e),
+        }
+
+    try:
+        clientes = pd.read_csv(CSV_CLIENTES, dtype=str)
+        clientes.columns = clientes.columns.str.strip()
+        clientes = clientes.map(lambda x: x.strip() if isinstance(x, str) else x)
+        linha_cliente = clientes[clientes["cpf"] == cpf]
+        if linha_cliente.empty:
+            return {
+                "aprovado": False,
+                "score_minimo_necessario": 1000,
+                "erro": "Cliente autenticado não encontrado.",
+            }
+        score_cliente = int(linha_cliente.iloc[0]["score_credito"])
+
         df = pd.read_csv(CSV_SCORE_LIMITE, dtype=str)
         df.columns = df.columns.str.strip()
         df["limite_maximo"] = df["limite_maximo"].str.strip().astype(float)
@@ -176,7 +227,7 @@ def checar_score_para_limite(score_cliente: int, novo_limite: float) -> dict:
             "erro": "Tabela de score não encontrada.",
         }
     except Exception as e:
-        print(f"[TOOL ERROR] checar_score_para_limite: {type(e).__name__}: {e}")
+        print(f"[TOOL ERROR] checar_score_para_limite: {type(e).__name__}")
         return {
             "aprovado": False,
             "score_minimo_necessario": 1000,
@@ -185,23 +236,28 @@ def checar_score_para_limite(score_cliente: int, novo_limite: float) -> dict:
 
 
 def atualizar_status_solicitacao(
-    cpf: str,
     data_hora_solicitacao: str,
     novo_status: str,
+    tool_context: ToolContext,
 ) -> dict:
     """
     Atualiza o status de uma solicitação existente em solicitacoes_aumento_limite.csv.
 
     Args:
-        cpf: CPF do cliente.
         data_hora_solicitacao: Timestamp ISO 8601 da solicitação (chave de busca).
         novo_status: Novo status — 'aprovado' ou 'rejeitado'.
+        tool_context: Contexto ADK da sessão autenticada.
 
     Returns:
         dict com:
             atualizado (bool).
             erro (str | None).
     """
+    try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return {"atualizado": False, "erro": str(e)}
+
     try:
         _garantir_csv_solicitacoes()
 
@@ -210,14 +266,14 @@ def atualizar_status_solicitacao(
         df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
 
         mascara = (
-            (df["cpf_cliente"] == cpf.strip()) &
+            (df["cpf_cliente"] == cpf) &
             (df["data_hora_solicitacao"] == data_hora_solicitacao.strip())
         )
 
         if not mascara.any():
             return {
                 "atualizado": False,
-                "erro": f"Solicitação não encontrada para CPF {cpf} em {data_hora_solicitacao}.",
+                "erro": "Solicitação do cliente autenticado não encontrada.",
             }
 
         df.loc[mascara, "status_pedido"] = novo_status
@@ -226,20 +282,23 @@ def atualizar_status_solicitacao(
         return {"atualizado": True, "erro": None}
 
     except Exception as e:
-        print(f"[TOOL ERROR] atualizar_status_solicitacao: {type(e).__name__}: {e}")
+        print(f"[TOOL ERROR] atualizar_status_solicitacao: {type(e).__name__}")
         return {
             "atualizado": False,
             "erro": "Erro ao atualizar status da solicitação.",
         }
 
 
-def atualizar_limite_cliente(cpf: str, novo_limite: float) -> dict:
+def atualizar_limite_cliente(
+    novo_limite: float,
+    tool_context: ToolContext,
+) -> dict:
     """
     Atualiza o limite de crédito do cliente em clientes.csv após aprovação.
 
     Args:
-        cpf: CPF do cliente.
         novo_limite: Novo limite aprovado em R$.
+        tool_context: Contexto ADK da sessão autenticada.
 
     Returns:
         dict com:
@@ -247,15 +306,20 @@ def atualizar_limite_cliente(cpf: str, novo_limite: float) -> dict:
             erro (str | None).
     """
     try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return {"atualizado": False, "erro": str(e)}
+
+    try:
         df = pd.read_csv(CSV_CLIENTES, dtype=str)
         df.columns = df.columns.str.strip()
         df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
 
-        mascara = df["cpf"] == cpf.strip()
+        mascara = df["cpf"] == cpf
         if not mascara.any():
             return {
                 "atualizado": False,
-                "erro": f"Cliente com CPF {cpf} não encontrado para atualização.",
+                "erro": "Cliente autenticado não encontrado para atualização.",
             }
 
         df.loc[mascara, "limite_credito"] = str(float(novo_limite))
@@ -264,7 +328,7 @@ def atualizar_limite_cliente(cpf: str, novo_limite: float) -> dict:
         return {"atualizado": True, "erro": None}
 
     except Exception as e:
-        print(f"[TOOL ERROR] atualizar_limite_cliente: {type(e).__name__}: {e}")
+        print(f"[TOOL ERROR] atualizar_limite_cliente: {type(e).__name__}")
         return {
             "atualizado": False,
             "erro": "Erro ao atualizar limite do cliente. Tente novamente.",
