@@ -1,6 +1,6 @@
 # Spec 00 — Memória do Projeto
 
-## Status: Atualizado após a Fase 1
+## Status: Atualizado após a Fase 2
 
 ---
 
@@ -16,28 +16,31 @@ ser atualizada somente com evidências verificadas no Git e nos testes.
 
 ---
 
-## 2. Estado Verificado no Fechamento da Fase 1
+## 2. Estado Verificado no Fechamento da Fase 2
 
 | Item | Estado |
 |---|---|
 | Branch principal | `main` |
-| HEAD funcional pós-F1 | `98ddb6a165ff30a1b503a77317db76061b20da75` |
-| `origin/main` no fechamento | `98ddb6a165ff30a1b503a77317db76061b20da75` |
+| HEAD funcional pós-F2 | `746fa5ba59043b041a19a3c6bef450975c9c5f11` |
+| `origin/main` no fechamento | `746fa5ba59043b041a19a3c6bef450975c9c5f11` |
 | Fase 1 | concluída e integrada |
-| Pull Request | [#7](https://github.com/andmartins7/banking-agent/pull/7), mergeado |
-| Suíte completa | 284/284 aprovados |
+| Fase 2 | concluída e integrada |
+| Pull Request da Fase 2 | [#9](https://github.com/andmartins7/banking-agent/pull/9), squash-mergeado |
+| Suíte completa | 365/365 aprovados |
 | Falhos | 0 |
+| Erros | 0 |
 | Ignorados | 0 |
-| Próxima fase | Fase 2 — Câmbio seguro e testável |
+| Próximo passo | investigar P0 restante e o estado atual da UI/fluxo completo |
 
-O commit acima foi criado pelo squash merge do PR #7, com a mensagem:
+O HEAD acima foi criado pelo squash merge do PR #9, com a mensagem:
 
 ```text
-feat: make credit interview flow deterministic
+feat: make fx flow safe and deterministic
 ```
 
-A F2-001 foi concluída somente como investigação. Nenhuma implementação da
-Fase 2 foi realizada até este marco.
+O squash SHA da Fase 2 é
+`746fa5ba59043b041a19a3c6bef450975c9c5f11`. As Fases 1 e 2 estão
+concluídas e integradas em `main`.
 
 ---
 
@@ -124,6 +127,13 @@ existia nesse marco. Nenhuma dependência foi atualizada na Fase 0.
 
 Estado: **concluída, validada e integrada**.
 
+A Fase 1 foi integrada pelo squash merge do PR #7 no commit
+`98ddb6a165ff30a1b503a77317db76061b20da75`, com a mensagem:
+
+```text
+feat: make credit interview flow deterministic
+```
+
 A Fase 1 transferiu para código determinístico as decisões críticas do fluxo de
 crédito e da entrevista, mantendo o LLM restrito à comunicação e aos usos
 explicitamente autorizados das ferramentas.
@@ -160,50 +170,80 @@ Entregas comprovadas:
 
 ---
 
-## 5. Próxima Fase
+## 5. Fase 2 — Câmbio Seguro e Determinístico
 
-### Fase 2 — Câmbio seguro e testável
+Estado: **concluída, validada e integrada**.
 
-A F2-001 foi concluída como investigação. O hardening de Câmbio ainda não foi
-implementado.
+A Fase 2 isolou a integração externa, tornou a autorização e a apresentação
+da cotação determinísticas e impediu que o LLM produzisse ou alterasse dados
+financeiros.
 
-Achados comprovados:
+Entregas comprovadas:
 
-- o provider atual é a AwesomeAPI;
-- a URL base é controlada por configuração;
-- existe allowlist de moedas suportadas;
-- existe timeout explícito na chamada HTTP;
-- a própria tool de Câmbio não exige autorização da sessão;
-- o parsing da resposta externa ainda é permissivo;
-- a apresentação final ainda depende do LLM;
-- ainda não existem testes funcionais específicos de Câmbio;
-- o desenho recomendado é um provider/adapter mínimo e injetável.
+- integração com a AwesomeAPI isolada atrás de provider testável;
+- URL controlada e allowlist de moedas suportadas;
+- timeout HTTP explícito;
+- parsing e schema externos estritos;
+- números financeiros validados sem aceitar valores inválidos ou artificiais;
+- temporalidade fornecida pela fonte preservada, sem timezone inventada;
+- tool disponível somente para sessão autenticada e ativa;
+- CPF obtido internamente da sessão e ausente do schema exposto ao LLM;
+- falhas controladas sem cotações ou valores financeiros fictícios;
+- renderer determinístico com precedência sobre o texto produzido pelo LLM;
+- agente proibido de inventar, estimar, arredondar ou alterar a cotação;
+- handoff interno mantido invisível para o cliente;
+- cenários E2E de sucesso e indisponibilidade comprovados;
+- testes executados sem rede externa ou LLM real;
+- integridade dos três CSVs reais preservada por hashes SHA-256.
 
-O próximo trabalho autorizado é implementar e testar esse hardening sem
-expandir o escopo para outras áreas.
+### 5.1 Evidências da Fase 2
+
+| Gate | Resultado |
+|---|---|
+| Pull Request | [#9](https://github.com/andmartins7/banking-agent/pull/9), squash-mergeado |
+| Squash SHA | `746fa5ba59043b041a19a3c6bef450975c9c5f11` |
+| Arquivos integrados | 9 |
+| Testes focados de Câmbio | 115/115 aprovados |
+| Suíte completa | 365/365 aprovados |
+| Falhos | 0 |
+| Erros | 0 |
+| Ignorados | 0 |
+| `compileall` | exit code 0 |
+| `git diff --check` | exit code 0 |
+| Rede externa ou LLM real nos testes | não utilizados |
+| CSVs reais | hashes SHA-256 preservados |
 
 ---
 
-## 6. Débitos Preservados
+## 6. Próximo Passo
 
-Permanecem pendentes após a Fase 1:
+Próximo: investigar P0 restante e o estado atual da UI/fluxo completo.
 
-- hardening e testes funcionais de Câmbio;
+A condição atual da UI e do fluxo completo ainda deve ser verificada. Esta
+memória não antecipa seu diagnóstico e não inicia essa investigação.
+
+---
+
+## 7. Débitos Preservados
+
+Permanecem pendentes após a Fase 2:
+
 - CI remota;
 - concorrência e locks para operações persistentes;
 - persistência de sessão apenas em memória;
 - warning transitivo sobre `google-cloud-storage < 3.0.0`;
-- validação integral do fluxo pela interface Streamlit;
 - segurança e observabilidade não cobertas pelas fases concluídas;
-- matriz completa de quality gates;
-- Docker, deploy e métricas opcionais.
+- quality gates adicionais ainda não configurados;
+- estado atual da UI, do fluxo completo e do README a verificar, sem falha
+  previamente presumida;
+- Docker, deploy e métricas como itens P2.
 
 Handoffs invisíveis e encerramento global não aparecem mais como débitos porque
 foram concluídos e validados na Fase 1.
 
 ---
 
-## 7. Regras de Atualização desta Memória
+## 8. Regras de Atualização desta Memória
 
 Ao concluir uma fase:
 
