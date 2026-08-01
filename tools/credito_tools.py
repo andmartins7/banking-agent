@@ -8,8 +8,11 @@ Funções expostas como tools do Google ADK:
 """
 
 import math
+import os
+import tempfile
 import pandas as pd
 from datetime import datetime, timezone
+from pathlib import Path
 from google.adk.tools.tool_context import ToolContext
 
 from config import CSV_CLIENTES, CSV_SCORE_LIMITE, CSV_SOLICITACOES
@@ -133,6 +136,52 @@ def _resultado_processamento_erro(mensagem: str) -> dict:
         "oferecer_entrevista": False,
         "erro": mensagem,
     }
+
+
+def _escrever_csv_atomico(dataframe: pd.DataFrame, destino: Path) -> None:
+    """Prepara um CSV ao lado do destino e o publica com substituição atômica."""
+    destino = Path(destino)
+    temporario = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=destino.parent,
+            prefix=f".{destino.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as arquivo:
+            temporario = Path(arquivo.name)
+            dataframe.to_csv(arquivo, index=False)
+            arquivo.flush()
+            os.fsync(arquivo.fileno())
+        os.replace(temporario, destino)
+    finally:
+        if temporario is not None and temporario.exists():
+            temporario.unlink()
+
+
+def _restaurar_bytes_atomico(conteudo: bytes, destino: Path) -> None:
+    """Restaura bytes capturados previamente por substituição atômica."""
+    destino = Path(destino)
+    temporario = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destino.parent,
+            prefix=f".{destino.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as arquivo:
+            temporario = Path(arquivo.name)
+            arquivo.write(conteudo)
+            arquivo.flush()
+            os.fsync(arquivo.fileno())
+        os.replace(temporario, destino)
+    finally:
+        if temporario is not None and temporario.exists():
+            temporario.unlink()
 
 
 def _garantir_csv_solicitacoes() -> None:
@@ -334,7 +383,7 @@ def processar_solicitacao(
             return _resultado_processamento_erro(
                 "A solicitação possui status persistido inválido."
             )
-        if status_atual != "pendente":
+        if status_atual == "rejeitado":
             return _resultado_processamento_erro(
                 "A solicitação já foi finalizada e não pode ser reprocessada."
             )
@@ -377,6 +426,38 @@ def processar_solicitacao(
 
         if not math.isfinite(limite_cliente) or limite_cliente < 0:
             raise ValueError("CSV de clientes malformado")
+
+        if status_atual == "aprovado":
+            if limite_cliente == novo_limite:
+                return _resultado_processamento_erro(
+                    "A aprovação já foi concluída e não pode ser reprocessada."
+                )
+            if limite_cliente != limite_snapshot:
+                return _resultado_processamento_erro(
+                    "O limite atual não corresponde ao estado recuperável da solicitação."
+                )
+
+            clientes.loc[mascara_cliente, "limite_credito"] = str(novo_limite)
+            try:
+                _escrever_csv_atomico(clientes, CSV_CLIENTES)
+            except Exception as e:
+                print(
+                    "[TOOL ERROR] processar_solicitacao recuperação: "
+                    f"{type(e).__name__}"
+                )
+                return _resultado_processamento_erro(
+                    "Não foi possível recuperar a aprovação. Tente novamente."
+                )
+
+            return {
+                "processado": True,
+                "status_pedido": "aprovado",
+                "limite_atualizado": True,
+                "novo_limite": novo_limite,
+                "oferecer_entrevista": False,
+                "erro": None,
+            }
+
         if limite_cliente != limite_snapshot:
             return _resultado_processamento_erro(
                 "O limite atual diverge do valor registrado na solicitação."
@@ -410,19 +491,55 @@ def processar_solicitacao(
         status_final = "aprovado" if aprovado else "rejeitado"
 
         solicitacoes.loc[mascara_solicitacao, "status_pedido"] = status_final
-        if aprovado:
-            clientes.loc[mascara_cliente, "limite_credito"] = str(novo_limite)
 
-        solicitacoes.to_csv(CSV_SOLICITACOES, index=False)
-        if aprovado:
-            clientes.to_csv(CSV_CLIENTES, index=False)
+        if not aprovado:
+            _escrever_csv_atomico(solicitacoes, CSV_SOLICITACOES)
+            return {
+                "processado": True,
+                "status_pedido": "rejeitado",
+                "limite_atualizado": False,
+                "novo_limite": None,
+                "oferecer_entrevista": True,
+                "erro": None,
+            }
+
+        solicitacoes_originais = Path(CSV_SOLICITACOES).read_bytes()
+        clientes_originais = Path(CSV_CLIENTES).read_bytes()
+        clientes.loc[mascara_cliente, "limite_credito"] = str(novo_limite)
+
+        _escrever_csv_atomico(solicitacoes, CSV_SOLICITACOES)
+        try:
+            _escrever_csv_atomico(clientes, CSV_CLIENTES)
+        except Exception as e:
+            print(
+                "[TOOL ERROR] processar_solicitacao publicação: "
+                f"{type(e).__name__}"
+            )
+            try:
+                if Path(CSV_CLIENTES).read_bytes() != clientes_originais:
+                    _restaurar_bytes_atomico(clientes_originais, CSV_CLIENTES)
+                _restaurar_bytes_atomico(
+                    solicitacoes_originais,
+                    CSV_SOLICITACOES,
+                )
+            except Exception as rollback_error:
+                print(
+                    "[TOOL ERROR] processar_solicitacao rollback: "
+                    f"{type(rollback_error).__name__}"
+                )
+                return _resultado_processamento_erro(
+                    "Não foi possível concluir a aprovação; recuperação pendente."
+                )
+            return _resultado_processamento_erro(
+                "Não foi possível concluir a aprovação; alterações revertidas."
+            )
 
         return {
             "processado": True,
-            "status_pedido": status_final,
-            "limite_atualizado": aprovado,
-            "novo_limite": novo_limite if aprovado else None,
-            "oferecer_entrevista": not aprovado,
+            "status_pedido": "aprovado",
+            "limite_atualizado": True,
+            "novo_limite": novo_limite,
+            "oferecer_entrevista": False,
             "erro": None,
         }
 

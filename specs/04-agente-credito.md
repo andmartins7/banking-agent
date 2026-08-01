@@ -208,15 +208,27 @@ def processar_solicitacao(
 
 **Lógica:**
 1. Autorizar a sessão e localizar exatamente uma solicitação pelo CPF autenticado e timestamp.
-2. Exigir status `pendente`, cliente único e correspondência entre o limite atual do cliente e o snapshot da solicitação.
+2. Exigir status `pendente` no fluxo normal; `aprovado` é aceito somente para a recuperação descrita abaixo.
 3. Obter `novo_limite_solicitado` do registro e revalidá-lo antes de qualquer escrita.
 4. Consultar `score_limite.csv` e decidir o status sem receber score, faixa ou status do modelo.
-5. Em rejeição, atualizar somente a solicitação e oferecer entrevista.
-6. Em aprovação, atualizar a solicitação e aplicar exatamente o valor registrado ao cliente.
+5. Em rejeição, publicar atomicamente somente a solicitação e oferecer entrevista.
+6. Em aprovação, publicar primeiro a solicitação e depois aplicar exatamente o valor registrado ao cliente.
 7. Bloquear sem escrita solicitações ou clientes ausentes/duplicados, dados inválidos, sessão não autorizada e CSVs ausentes/malformados.
 8. Não retornar CPF, score, score mínimo, faixa ou critérios da política.
 
 As funções de baixo nível `checar_score_para_limite`, `atualizar_status_solicitacao` e `atualizar_limite_cliente` permanecem no módulo apenas para compatibilidade interna e não são tools do agente.
+
+### 5.4 Garantias de Persistência e Recuperação
+
+- Cada CSV é preparado em um arquivo temporário no mesmo diretório, fechado e publicado individualmente com `os.replace`.
+- Falha durante a preparação ou substituição remove o temporário e preserva o destino anterior.
+- Na aprovação, a solicitação `aprovado` é publicada antes do novo limite do cliente.
+- Se a segunda publicação falhar, a tool tenta restaurar atomicamente os bytes originais da solicitação.
+- Se o rollback também falhar, permanece o estado reconhecível `aprovado + limite snapshot`; uma nova chamada aplica atomicamente ao cliente o valor já registrado.
+- `aprovado + limite já aplicado` é uma operação concluída e permanece bloqueada contra reprocessamento.
+- `aprovado + limite diferente do snapshot e do valor registrado` é bloqueado sem escrita.
+- A substituição é atômica por arquivo, mas não constitui transação atômica entre os dois CSVs.
+- Locks e controle de concorrência permanecem como débito separado.
 
 ---
 
@@ -262,6 +274,10 @@ agente_credito = Agent(
 | `score_limite.csv` não encontrado | Processamento retorna `erro` sem escrita; agente não comunica rejeição |
 | `novo_limite` não é número válido | Agente pede para informar um valor numérico (ex: "5000" ou "5000.00") |
 | Snapshot da solicitação diverge do limite do cliente | Processamento bloqueado sem escrita |
+| Aprovação interrompida após publicar a solicitação | Nova chamada reconhece `aprovado + limite snapshot` e aplica o valor registrado ao cliente |
+| Aprovação já aplicada | Reprocessamento bloqueado sem escrita |
+| Falha ao publicar o cliente | Rollback compensatório tenta restaurar a solicitação original |
+| Falha do rollback | Estado `aprovado + limite snapshot` permanece recuperável |
 | CSV ausente ou malformado | Processamento retorna erro controlado sem escrita |
 | Status persistido diferente de `pendente`, `aprovado` ou `rejeitado` | Processamento bloqueado sem escrita |
 | Solicitação já finalizada | Reprocessamento rejeitado sem escrita |
@@ -282,6 +298,11 @@ agente_credito = Agent(
 - [ ] Score insuficiente → tool atualiza somente o status para `'rejeitado'`.
 - [ ] Somente `pendente → aprovado` e `pendente → rejeitado` são permitidas.
 - [ ] Solicitação finalizada ou chave duplicada não é reprocessada.
+- [ ] Aprovação interrompida em `aprovado + limite snapshot` é recuperada com o valor registrado.
+- [ ] Aprovação já aplicada e limite divergente não reconhecido permanecem bloqueados.
+- [ ] Cada CSV é substituído atomicamente e não deixa arquivo `.tmp` residual.
+- [ ] Falha na segunda publicação tenta rollback compensatório da solicitação.
+- [ ] A solução não é descrita como transação atômica entre arquivos e não implementa locks.
 - [ ] Snapshot divergente e cliente ausente ou duplicado bloqueiam o processamento sem escrita.
 - [ ] Rejeição oferece opção de entrevista de crédito.
 - [ ] Aceite de entrevista faz handoff invisível para Agente de Entrevista.
