@@ -15,6 +15,8 @@ from session_state import (
     AUTHENTICATED,
     AUTHENTICATED_CPF,
     CONVERSATION_ENDED,
+    MENSAGEM_ATENDIMENTO_ENCERRADO,
+    encerrar_estado_atendimento,
 )
 
 
@@ -192,8 +194,11 @@ def encerrar_atendimento(tool_context: ToolContext) -> dict:
             encerrado (bool): sempre True.
             mensagem (str): confirmação do encerramento.
     """
-    tool_context.state[CONVERSATION_ENDED] = True
+    estado_encerrado = encerrar_estado_atendimento(tool_context.state)
+    tool_context.state[CONVERSATION_ENDED] = estado_encerrado[
+        CONVERSATION_ENDED
+    ]
     return {
         "encerrado": True,
-        "mensagem": "Atendimento encerrado com sucesso.",
+        "mensagem": MENSAGEM_ATENDIMENTO_ENCERRADO,
     }
