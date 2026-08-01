@@ -6,6 +6,7 @@ Qualquer assistente de programação deve consultar as specs antes de alterar co
 
 ## Índice
 
+- [00 — Memória do Projeto](00-memoria-projeto.md)
 - [01 — Visão Geral e Arquitetura do Sistema](01-visao-geral-arquitetura.md)
 - [02 — Dados, Modelos e Infraestrutura](02-dados-infraestrutura.md)
 - [03 — Agente de Triagem](03-agente-triagem.md)
