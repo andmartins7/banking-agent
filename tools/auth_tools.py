@@ -138,6 +138,8 @@ def autenticar_cliente(
         linha = df[df["cpf"] == cpf_normalizado]
         if linha.empty:
             return _registrar_falha_credencial(tool_context)
+        if len(linha) > 1:
+            return _registrar_falha_credencial(tool_context)
 
         # 4. Validar data de nascimento
         data_base = linha.iloc[0]["data_nascimento"]

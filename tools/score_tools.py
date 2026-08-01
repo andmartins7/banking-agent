@@ -22,7 +22,19 @@ from config import (
     SCORE_MIN,
     SCORE_MAX,
 )
-from session_state import ErroAutorizacaoSessao, obter_cpf_autorizado
+from session_state import (
+    CREDIT_INTERVIEW_COMPLETED,
+    CREDIT_INTERVIEW_FIELDS,
+    CREDIT_INTERVIEW_READY,
+    CREDIT_INTERVIEW_REQUEST_TIMESTAMP,
+    CREDIT_INTERVIEW_RESPONSES,
+    CREDIT_INTERVIEW_RETURN_PENDING,
+    CREDIT_INTERVIEW_STATUS,
+    ErroAutorizacaoSessao,
+    concluir_processamento_entrevista,
+    obter_cpf_autorizado,
+)
+from tools.credito_tools import _localizar_solicitacao_rejeitada_associada
 
 
 _CAMPOS_CLIENTES_OBRIGATORIOS = {"cpf", "score_credito"}
@@ -270,6 +282,91 @@ def _resultado_entrevista_erro(
     }
 
 
+def _autorizar_processamento_entrevista(
+    tool_context: ToolContext,
+    argumentos_llm: dict[str, object],
+) -> dict[str, object]:
+    """Autoriza a tool somente para a entrevista pronta e o pedido associado."""
+    try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return {"autorizado": False, "erro": str(e), "campo_invalido": None}
+
+    state = tool_context.state
+    if state.get(CREDIT_INTERVIEW_STATUS) != CREDIT_INTERVIEW_READY:
+        return {
+            "autorizado": False,
+            "erro": "A entrevista não está pronta para processamento.",
+            "campo_invalido": None,
+        }
+    if bool(state.get(CREDIT_INTERVIEW_RETURN_PENDING, False)):
+        return {
+            "autorizado": False,
+            "erro": "A entrevista já foi processada.",
+            "campo_invalido": None,
+        }
+
+    timestamp = state.get(CREDIT_INTERVIEW_REQUEST_TIMESTAMP)
+    respostas_estado = state.get(CREDIT_INTERVIEW_RESPONSES)
+    if not isinstance(respostas_estado, dict) or set(respostas_estado) != set(
+        CREDIT_INTERVIEW_FIELDS
+    ):
+        return {
+            "autorizado": False,
+            "erro": "As respostas determinísticas da entrevista estão incompletas.",
+            "campo_invalido": None,
+        }
+
+    respostas_normalizadas: dict[str, object] = {}
+    for campo in CREDIT_INTERVIEW_FIELDS:
+        valor_estado = respostas_estado[campo]
+        validacao_estado = validar_resposta_entrevista(campo, valor_estado)
+        if (
+            not validacao_estado["valida"]
+            or validacao_estado["valor_normalizado"] != valor_estado
+        ):
+            return {
+                "autorizado": False,
+                "erro": "As respostas da sessão não estão normalizadas.",
+                "campo_invalido": campo,
+            }
+        respostas_normalizadas[campo] = validacao_estado["valor_normalizado"]
+
+    for campo in CREDIT_INTERVIEW_FIELDS:
+        validacao_argumento = validar_resposta_entrevista(
+            campo,
+            argumentos_llm.get(campo),
+        )
+        if not validacao_argumento["valida"]:
+            return {
+                "autorizado": False,
+                "erro": validacao_argumento["erro"],
+                "campo_invalido": campo,
+            }
+        if validacao_argumento["valor_normalizado"] != respostas_normalizadas[campo]:
+            return {
+                "autorizado": False,
+                "erro": "Os valores informados divergem das respostas da sessão.",
+                "campo_invalido": campo,
+            }
+
+    pedido = _localizar_solicitacao_rejeitada_associada(cpf, timestamp)
+    if not pedido["localizada"]:
+        return {
+            "autorizado": False,
+            "erro": pedido["erro"],
+            "campo_invalido": None,
+        }
+
+    return {
+        "autorizado": True,
+        "cpf": cpf,
+        "respostas": respostas_normalizadas,
+        "erro": None,
+        "campo_invalido": None,
+    }
+
+
 def processar_entrevista_credito(
     renda_mensal: float,
     tipo_emprego: str,
@@ -278,20 +375,46 @@ def processar_entrevista_credito(
     tem_dividas: str,
     tool_context: ToolContext,
 ) -> dict:
-    """Valida a entrevista, calcula o score e publica o perfil atualizado."""
-    try:
-        cpf = obter_cpf_autorizado(tool_context)
-    except ErroAutorizacaoSessao as e:
-        return _resultado_entrevista_erro(str(e))
-
-    return processar_entrevista_credito_autorizada(
-        cpf=cpf,
-        renda_mensal=renda_mensal,
-        tipo_emprego=tipo_emprego,
-        despesas_fixas=despesas_fixas,
-        num_dependentes=num_dependentes,
-        tem_dividas=tem_dividas,
+    """Processa somente respostas idênticas ao estado pronto e associado."""
+    argumentos_llm = {
+        "renda_mensal": renda_mensal,
+        "tipo_emprego": tipo_emprego,
+        "despesas_fixas": despesas_fixas,
+        "num_dependentes": num_dependentes,
+        "tem_dividas": tem_dividas,
+    }
+    autorizacao = _autorizar_processamento_entrevista(
+        tool_context,
+        argumentos_llm,
     )
+    if not autorizacao["autorizado"]:
+        return _resultado_entrevista_erro(
+            autorizacao["erro"],
+            autorizacao["campo_invalido"],
+        )
+
+    respostas = autorizacao["respostas"]
+    resultado = processar_entrevista_credito_autorizada(
+        cpf=autorizacao["cpf"],
+        renda_mensal=respostas["renda_mensal"],
+        tipo_emprego=respostas["tipo_emprego"],
+        despesas_fixas=respostas["despesas_fixas"],
+        num_dependentes=respostas["num_dependentes"],
+        tem_dividas=respostas["tem_dividas"],
+    )
+    if resultado["processado"] and resultado["perfil_atualizado"]:
+        estado_concluido = concluir_processamento_entrevista(tool_context.state)
+        tool_context.state[CREDIT_INTERVIEW_STATUS] = estado_concluido[
+            CREDIT_INTERVIEW_STATUS
+        ]
+        tool_context.state[CREDIT_INTERVIEW_RETURN_PENDING] = estado_concluido[
+            CREDIT_INTERVIEW_RETURN_PENDING
+        ]
+        if tool_context.state[CREDIT_INTERVIEW_STATUS] != CREDIT_INTERVIEW_COMPLETED:
+            return _resultado_entrevista_erro(
+                "Não foi possível concluir o estado da entrevista."
+            )
+    return resultado
 
 
 def processar_entrevista_credito_autorizada(

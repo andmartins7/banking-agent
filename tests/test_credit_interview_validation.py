@@ -1,6 +1,7 @@
 import inspect
 import math
 import unittest
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 import pandas as pd
@@ -153,7 +154,7 @@ class CreditInterviewValidationTests(unittest.TestCase):
         calcular.assert_not_called()
         escrever.assert_not_called()
 
-    def test_tool_consolidada_usa_a_interface_e_os_valores_normalizados(self):
+    def test_tool_consolidada_usa_somente_respostas_autorizadas_do_estado(self):
         clientes = pd.DataFrame([
             {
                 "cpf": "11111111111",
@@ -161,6 +162,10 @@ class CreditInterviewValidationTests(unittest.TestCase):
             }
         ])
         original = score_tools.validar_resposta_entrevista
+        contexto = SimpleNamespace(state={
+            "credit_interview_status": "ready_for_processing",
+            "credit_interview_return_pending": False,
+        })
 
         with (
             patch(
@@ -168,9 +173,21 @@ class CreditInterviewValidationTests(unittest.TestCase):
                 wraps=original,
             ) as validar,
             patch(
-                "tools.score_tools.obter_cpf_autorizado",
-                return_value="11111111111",
-            ),
+                "tools.score_tools._autorizar_processamento_entrevista",
+                return_value={
+                    "autorizado": True,
+                    "cpf": "11111111111",
+                    "respostas": {
+                        "renda_mensal": 5000.0,
+                        "tipo_emprego": "formal",
+                        "despesas_fixas": 2000.0,
+                        "num_dependentes": 1,
+                        "tem_dividas": "nao",
+                    },
+                    "erro": None,
+                    "campo_invalido": None,
+                },
+            ) as autorizar,
             patch("tools.score_tools.pd.read_csv", return_value=clientes),
             patch(
                 "tools.score_tools._calcular_score_oficial",
@@ -184,17 +201,18 @@ class CreditInterviewValidationTests(unittest.TestCase):
                 despesas_fixas="2000",
                 num_dependentes="1",
                 tem_dividas="não tenho",
-                tool_context=object(),
+                tool_context=contexto,
             )
 
         self.assertTrue(resultado["processado"])
+        autorizar.assert_called_once()
         self.assertEqual(
             [
-                call("renda_mensal", "5000"),
-                call("tipo_emprego", "CLT"),
-                call("despesas_fixas", "2000"),
-                call("num_dependentes", "1"),
-                call("tem_dividas", "não tenho"),
+                call("renda_mensal", 5000.0),
+                call("tipo_emprego", "formal"),
+                call("despesas_fixas", 2000.0),
+                call("num_dependentes", 1),
+                call("tem_dividas", "nao"),
             ],
             validar.call_args_list,
         )
