@@ -617,20 +617,30 @@ def reanalisar_solicitacao(tool_context: ToolContext) -> dict:
     )
 
 
-def reanalisar_solicitacao_autorizada(
+def _localizar_solicitacao_rejeitada_associada(
     cpf: str,
     timestamp_associado: object,
-) -> dict:
-    """Reanalisa por identidade já autorizada, sem depender de ToolContext."""
+) -> dict[str, object]:
+    """Localiza um único pedido rejeitado pela identidade e referência internas."""
     if not isinstance(timestamp_associado, str):
-        return _resultado_processamento_erro(
-            "Não há solicitação rejeitada associada à entrevista."
-        )
+        return {
+            "localizada": False,
+            "erro": "Não há solicitação rejeitada associada à entrevista.",
+        }
+
     timestamp = timestamp_associado.strip()
-    if not timestamp:
-        return _resultado_processamento_erro(
-            "Não há solicitação rejeitada associada à entrevista."
-        )
+    try:
+        instante = datetime.fromisoformat(timestamp)
+    except (TypeError, ValueError):
+        return {
+            "localizada": False,
+            "erro": "A referência da solicitação associada é inválida.",
+        }
+    if instante.tzinfo is None or instante.utcoffset() is None:
+        return {
+            "localizada": False,
+            "erro": "A referência da solicitação associada é inválida.",
+        }
 
     try:
         solicitacoes = pd.read_csv(CSV_SOLICITACOES, dtype=str)
@@ -654,21 +664,71 @@ def reanalisar_solicitacao_autorizada(
         )
         quantidade_solicitacoes = int(mascara_solicitacao.sum())
         if quantidade_solicitacoes == 0:
-            return _resultado_processamento_erro(
-                "Solicitação rejeitada do cliente autenticado não encontrada."
-            )
+            return {
+                "localizada": False,
+                "erro": "Solicitação rejeitada do cliente autenticado não encontrada.",
+            }
         if quantidade_solicitacoes > 1:
-            return _resultado_processamento_erro(
-                "Erro de integridade: mais de uma solicitação encontrada."
-            )
+            return {
+                "localizada": False,
+                "erro": "Erro de integridade: mais de uma solicitação encontrada.",
+            }
 
         solicitacao = solicitacoes.loc[mascara_solicitacao].iloc[0]
         status_atual = str(solicitacao["status_pedido"]).strip().lower()
         if status_atual != "rejeitado":
-            return _resultado_processamento_erro(
-                "Somente uma solicitação rejeitada pode ser reanalisada."
-            )
+            return {
+                "localizada": False,
+                "erro": "Somente uma solicitação rejeitada pode ser processada.",
+            }
+    except FileNotFoundError:
+        return {
+            "localizada": False,
+            "erro": "Arquivo de solicitações necessário não encontrado.",
+        }
+    except (KeyError, pd.errors.EmptyDataError, pd.errors.ParserError, ValueError):
+        return {
+            "localizada": False,
+            "erro": "Base de solicitações inválida.",
+        }
+    except Exception as e:
+        print(
+            "[TOOL ERROR] localizar solicitação rejeitada: "
+            f"{type(e).__name__}"
+        )
+        return {
+            "localizada": False,
+            "erro": "Não foi possível validar a solicitação associada.",
+        }
 
+    return {
+        "localizada": True,
+        "timestamp": timestamp,
+        "solicitacoes": solicitacoes,
+        "mascara_solicitacao": mascara_solicitacao,
+        "solicitacao": solicitacao,
+        "erro": None,
+    }
+
+
+def reanalisar_solicitacao_autorizada(
+    cpf: str,
+    timestamp_associado: object,
+) -> dict:
+    """Reanalisa por identidade já autorizada, sem depender de ToolContext."""
+    localizacao = _localizar_solicitacao_rejeitada_associada(
+        cpf,
+        timestamp_associado,
+    )
+    if not localizacao["localizada"]:
+        return _resultado_processamento_erro(localizacao["erro"])
+
+    timestamp = localizacao["timestamp"]
+    solicitacoes = localizacao["solicitacoes"]
+    mascara_solicitacao = localizacao["mascara_solicitacao"]
+    solicitacao = localizacao["solicitacao"]
+
+    try:
         try:
             novo_limite = _validar_novo_limite(
                 solicitacao["novo_limite_solicitado"],

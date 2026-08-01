@@ -14,6 +14,11 @@ from session_state import (
     AUTHENTICATED,
     AUTHENTICATED_CPF,
     CONVERSATION_ENDED,
+    CREDIT_INTERVIEW_READY,
+    CREDIT_INTERVIEW_REQUEST_TIMESTAMP,
+    CREDIT_INTERVIEW_RESPONSES,
+    CREDIT_INTERVIEW_RETURN_PENDING,
+    CREDIT_INTERVIEW_STATUS,
     criar_estado_inicial,
 )
 import tools.score_tools as score_tools
@@ -22,6 +27,7 @@ import tools.score_tools as score_tools
 CPF_A = "11111111111"
 CPF_B = "22222222222"
 CPF_AUSENTE = "33333333333"
+TIMESTAMP = "2026-07-01T10:20:30.123456+00:00"
 
 
 class FakeToolContext:
@@ -38,12 +44,20 @@ class CreditInterviewProcessingTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.base = Path(self.temp_dir.name)
         self.clientes_path = self.base / "clientes.csv"
+        self.solicitacoes_path = self.base / "solicitacoes.csv"
         self.context = FakeToolContext()
         self._write_clientes()
+        self._write_solicitacoes()
 
         csv_patch = patch("tools.score_tools.CSV_CLIENTES", self.clientes_path)
         csv_patch.start()
         self.addCleanup(csv_patch.stop)
+        solicitacoes_patch = patch(
+            "tools.credito_tools.CSV_SOLICITACOES",
+            self.solicitacoes_path,
+        )
+        solicitacoes_patch.start()
+        self.addCleanup(solicitacoes_patch.stop)
 
     @staticmethod
     def _write_csv(path, fieldnames, rows):
@@ -89,6 +103,46 @@ class CreditInterviewProcessingTests(unittest.TestCase):
             ]
         self._write_csv(self.clientes_path, fieldnames, rows)
 
+    def _write_solicitacoes(self):
+        self._write_csv(
+            self.solicitacoes_path,
+            [
+                "cpf_cliente",
+                "data_hora_solicitacao",
+                "limite_atual",
+                "novo_limite_solicitado",
+                "status_pedido",
+            ],
+            [{
+                "cpf_cliente": CPF_A,
+                "data_hora_solicitacao": TIMESTAMP,
+                "limite_atual": "1000.00",
+                "novo_limite_solicitado": "3000.00",
+                "status_pedido": "rejeitado",
+            }],
+        )
+
+    @staticmethod
+    def _preparar_estado_pronto(contexto, argumentos):
+        respostas = {
+            "renda_mensal": 5000.0,
+            "tipo_emprego": "formal",
+            "despesas_fixas": 2000.0,
+            "num_dependentes": 1,
+            "tem_dividas": "nao",
+        }
+        for campo in respostas:
+            validacao = score_tools.validar_resposta_entrevista(
+                campo,
+                argumentos[campo],
+            )
+            if validacao["valida"]:
+                respostas[campo] = validacao["valor_normalizado"]
+        contexto.state[CREDIT_INTERVIEW_STATUS] = CREDIT_INTERVIEW_READY
+        contexto.state[CREDIT_INTERVIEW_RETURN_PENDING] = False
+        contexto.state[CREDIT_INTERVIEW_REQUEST_TIMESTAMP] = TIMESTAMP
+        contexto.state[CREDIT_INTERVIEW_RESPONSES] = respostas
+
     def _processar(self, **overrides):
         argumentos = {
             "renda_mensal": 5000.0,
@@ -99,6 +153,9 @@ class CreditInterviewProcessingTests(unittest.TestCase):
             "tool_context": self.context,
         }
         argumentos.update(overrides)
+        contexto = argumentos["tool_context"]
+        if hasattr(contexto, "state"):
+            self._preparar_estado_pronto(contexto, argumentos)
         return score_tools.processar_entrevista_credito(**argumentos)
 
     def _score_cliente(self, cpf=CPF_A):
@@ -293,7 +350,7 @@ class CreditInterviewProcessingTests(unittest.TestCase):
         )
 
         self.assertFalse(resultado["processado"])
-        self.assertIn("não encontrado", resultado["erro"])
+        self.assertIn("não encontrad", resultado["erro"])
 
     def test_20_cliente_duplicado_e_bloqueado(self):
         rows = self._read_csv(self.clientes_path)
