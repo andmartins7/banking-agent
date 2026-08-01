@@ -4,9 +4,7 @@ Ferramentas de crédito do Banco Ágil.
 Funções expostas como tools do Google ADK:
     - consultar_limite
     - registrar_solicitacao
-    - checar_score_para_limite
-    - atualizar_status_solicitacao
-    - atualizar_limite_cliente
+    - processar_solicitacao
 """
 
 import math
@@ -124,6 +122,18 @@ def _resultado_status_erro(
         "status_novo": status_novo,
         "erro": mensagem,
     }
+
+
+def _resultado_processamento_erro(mensagem: str) -> dict:
+    return {
+        "processado": False,
+        "status_pedido": None,
+        "limite_atualizado": False,
+        "novo_limite": None,
+        "oferecer_entrevista": False,
+        "erro": mensagem,
+    }
+
 
 def _garantir_csv_solicitacoes() -> None:
     """Cria o CSV de solicitações com cabeçalho se ainda não existir."""
@@ -265,6 +275,165 @@ def registrar_solicitacao(
         print(f"[TOOL ERROR] registrar_solicitacao: {type(e).__name__}")
         return _resultado_registro_erro(
             "Erro ao registrar solicitação. Tente novamente."
+        )
+
+
+def processar_solicitacao(
+    data_hora_solicitacao: str,
+    tool_context: ToolContext,
+) -> dict:
+    """Decide e aplica deterministicamente uma solicitação pendente."""
+    try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return _resultado_processamento_erro(str(e))
+
+    if not isinstance(data_hora_solicitacao, str):
+        return _resultado_processamento_erro(
+            "O timestamp da solicitação é inválido."
+        )
+    timestamp = data_hora_solicitacao.strip()
+    if not timestamp:
+        return _resultado_processamento_erro(
+            "O timestamp da solicitação é inválido."
+        )
+
+    try:
+        solicitacoes = pd.read_csv(CSV_SOLICITACOES, dtype=str)
+        solicitacoes.columns = solicitacoes.columns.str.strip()
+        colunas_solicitacao = {
+            "cpf_cliente",
+            "data_hora_solicitacao",
+            "limite_atual",
+            "novo_limite_solicitado",
+            "status_pedido",
+        }
+        if not colunas_solicitacao.issubset(solicitacoes.columns):
+            raise ValueError("CSV de solicitações malformado")
+        solicitacoes = solicitacoes.map(
+            lambda x: x.strip() if isinstance(x, str) else x
+        )
+
+        mascara_solicitacao = (
+            (solicitacoes["cpf_cliente"] == cpf)
+            & (solicitacoes["data_hora_solicitacao"] == timestamp)
+        )
+        quantidade_solicitacoes = int(mascara_solicitacao.sum())
+        if quantidade_solicitacoes == 0:
+            return _resultado_processamento_erro(
+                "Solicitação do cliente autenticado não encontrada."
+            )
+        if quantidade_solicitacoes > 1:
+            return _resultado_processamento_erro(
+                "Erro de integridade: mais de uma solicitação encontrada."
+            )
+
+        solicitacao = solicitacoes.loc[mascara_solicitacao].iloc[0]
+        status_atual = str(solicitacao["status_pedido"]).strip().lower()
+        if status_atual not in {"pendente", "aprovado", "rejeitado"}:
+            return _resultado_processamento_erro(
+                "A solicitação possui status persistido inválido."
+            )
+        if status_atual != "pendente":
+            return _resultado_processamento_erro(
+                "A solicitação já foi finalizada e não pode ser reprocessada."
+            )
+
+        try:
+            novo_limite = _validar_novo_limite(
+                solicitacao["novo_limite_solicitado"],
+                solicitacao["limite_atual"],
+            )
+            limite_snapshot = float(solicitacao["limite_atual"])
+        except _ErroValidacaoLimite as e:
+            return _resultado_processamento_erro(str(e))
+
+        clientes = pd.read_csv(CSV_CLIENTES, dtype=str)
+        clientes.columns = clientes.columns.str.strip()
+        colunas_cliente = {"cpf", "score_credito", "limite_credito"}
+        if not colunas_cliente.issubset(clientes.columns):
+            raise ValueError("CSV de clientes malformado")
+        clientes = clientes.map(
+            lambda x: x.strip() if isinstance(x, str) else x
+        )
+
+        mascara_cliente = clientes["cpf"] == cpf
+        quantidade_clientes = int(mascara_cliente.sum())
+        if quantidade_clientes == 0:
+            return _resultado_processamento_erro(
+                "Cliente autenticado não encontrado."
+            )
+        if quantidade_clientes > 1:
+            return _resultado_processamento_erro(
+                "Erro de integridade: mais de um cliente autenticado encontrado."
+            )
+
+        cliente = clientes.loc[mascara_cliente].iloc[0]
+        try:
+            limite_cliente = float(cliente["limite_credito"])
+            score_cliente = int(cliente["score_credito"])
+        except (TypeError, ValueError) as e:
+            raise ValueError("CSV de clientes malformado") from e
+
+        if not math.isfinite(limite_cliente) or limite_cliente < 0:
+            raise ValueError("CSV de clientes malformado")
+        if limite_cliente != limite_snapshot:
+            return _resultado_processamento_erro(
+                "O limite atual diverge do valor registrado na solicitação."
+            )
+
+        try:
+            novo_limite = _validar_novo_limite(novo_limite, limite_cliente)
+        except _ErroValidacaoLimite as e:
+            return _resultado_processamento_erro(str(e))
+
+        faixas = pd.read_csv(CSV_SCORE_LIMITE, dtype=str)
+        faixas.columns = faixas.columns.str.strip()
+        colunas_faixa = {"limite_maximo", "score_minimo"}
+        if not colunas_faixa.issubset(faixas.columns) or faixas.empty:
+            raise ValueError("CSV de faixas malformado")
+        faixas["limite_maximo"] = (
+            faixas["limite_maximo"].str.strip().astype(float)
+        )
+        faixas["score_minimo"] = (
+            faixas["score_minimo"].str.strip().astype(int)
+        )
+        if not faixas["limite_maximo"].map(math.isfinite).all():
+            raise ValueError("CSV de faixas malformado")
+
+        faixas = faixas.sort_values("limite_maximo").reset_index(drop=True)
+        faixa = faixas[faixas["limite_maximo"] >= novo_limite]
+        aprovado = (
+            not faixa.empty
+            and score_cliente >= int(faixa.iloc[0]["score_minimo"])
+        )
+        status_final = "aprovado" if aprovado else "rejeitado"
+
+        solicitacoes.loc[mascara_solicitacao, "status_pedido"] = status_final
+        if aprovado:
+            clientes.loc[mascara_cliente, "limite_credito"] = str(novo_limite)
+
+        solicitacoes.to_csv(CSV_SOLICITACOES, index=False)
+        if aprovado:
+            clientes.to_csv(CSV_CLIENTES, index=False)
+
+        return {
+            "processado": True,
+            "status_pedido": status_final,
+            "limite_atualizado": aprovado,
+            "novo_limite": novo_limite if aprovado else None,
+            "oferecer_entrevista": not aprovado,
+            "erro": None,
+        }
+
+    except FileNotFoundError:
+        return _resultado_processamento_erro(
+            "Arquivo necessário ao processamento não encontrado."
+        )
+    except Exception as e:
+        print(f"[TOOL ERROR] processar_solicitacao: {type(e).__name__}")
+        return _resultado_processamento_erro(
+            "Erro ao processar solicitação. Tente novamente."
         )
 
 
