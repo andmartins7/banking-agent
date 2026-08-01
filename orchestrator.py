@@ -49,6 +49,7 @@ from tools.score_tools import (
     validar_resposta_entrevista,
 )
 from tools.credito_tools import reanalisar_solicitacao_autorizada
+from tools.cambio_tools import renderizar_resultado_cotacao
 
 load_dotenv()
 
@@ -528,6 +529,8 @@ def processar_mensagem(session_id: str, mensagem_usuario: str) -> str:
         str: Resposta do agente para exibição na interface.
     """
     resposta_final = ""
+    resultado_cambio_encontrado = False
+    resultado_cambio = None
     try:
         resposta_encerramento = _processar_encerramento_global(
             session_id,
@@ -560,10 +563,19 @@ def processar_mensagem(session_id: str, mensagem_usuario: str) -> str:
             session_id=session_id,
             new_message=content,
         ):
+            obter_respostas = getattr(event, "get_function_responses", None)
+            if callable(obter_respostas):
+                for resposta_tool in obter_respostas():
+                    if resposta_tool.name == "buscar_cotacao":
+                        resultado_cambio_encontrado = True
+                        resultado_cambio = resposta_tool.response
             if event.is_final_response():
                 if event.content and event.content.parts:
                     resposta_final = event.content.parts[0].text or ""
                 break
+
+        if resultado_cambio_encontrado:
+            return renderizar_resultado_cotacao(resultado_cambio).strip()
 
         oferta_pendente = _obter_oferta_pendente(session_id)
         if oferta_pendente is not None:
