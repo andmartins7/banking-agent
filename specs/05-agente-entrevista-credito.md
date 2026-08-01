@@ -1,321 +1,234 @@
 # Spec 05 — Agente de Entrevista de Crédito
 
-## Status: Draft
+## Status: Implementado
 
 ---
 
 ## 1. Visão Geral
 
-O Agente de Entrevista de Crédito é acionado exclusivamente pelo Agente de Crédito quando uma solicitação de aumento é rejeitada e o cliente aceita realizar a entrevista financeira. Ele conduz uma conversa estruturada para coletar dados financeiros, calcula um novo score usando a fórmula ponderada definida no desafio, persiste o resultado em `clientes.csv` e devolve o controle ao Agente de Crédito para nova análise.
+O Agente de Entrevista de Crédito coleta cinco respostas financeiras e as
+entrega a uma única operação determinística. A mesma operação valida os dados,
+calcula o score pela política oficial e publica a atualização do cliente
+autenticado em `clientes.csv`.
 
-**Arquivo de implementação:** `agents/entrevista_credito.py`  
-**Ferramentas usadas:** `tools/score_tools.py`
+O LLM não calcula, fornece, recebe nem persiste diretamente o score. O valor
+numérico do score também não é informado ao cliente.
+
+**Arquivo do agente:** `agents/entrevista_credito.py`
+**Ferramentas:** `tools/score_tools.py`
 
 ---
 
 ## 2. Responsabilidades
 
-1. Conduzir entrevista conversacional estruturada com 5 perguntas financeiras.
-2. Coletar e validar: renda mensal, tipo de emprego, despesas fixas, nº de dependentes e dívidas ativas.
-3. Calcular novo score via ferramenta `calcular_score`.
-4. Atualizar `score_credito` do cliente em `clientes.csv` via ferramenta `atualizar_score_cliente`.
-5. Informar o novo score ao cliente de forma amigável (sem expor a fórmula).
-6. Retornar o controle ao Agente de Crédito para que o cliente tente nova solicitação.
+1. Fazer cinco perguntas, uma de cada vez e na ordem definida.
+2. Enviar somente as cinco respostas para `processar_entrevista_credito`.
+3. Pedir a correção do campo indicado quando a tool rejeitar uma resposta.
+4. Em sucesso, informar apenas que o perfil foi atualizado.
+5. Sinalizar o retorno ao fluxo de crédito sem afirmar aprovação.
+6. Permitir o encerramento do atendimento a qualquer momento.
+
+O estado conversacional das cinco perguntas e a comprovação automatizada do
+handoff real permanecem fora do escopo desta especificação.
 
 ---
 
 ## 3. Perguntas da Entrevista
 
-As perguntas devem ser feitas **uma de cada vez**, em sequência, aguardando a resposta antes de avançar. O tom deve ser natural e acolhedor, não parecer um formulário frio.
+| # | Campo | Pergunta sugerida |
+|---|---|---|
+| 1 | `renda_mensal` | "Qual é a sua renda mensal aproximada em reais?" |
+| 2 | `tipo_emprego` | "Você trabalha formalmente, é autônomo ou está desempregado?" |
+| 3 | `despesas_fixas` | "Quais são suas despesas fixas mensais aproximadas?" |
+| 4 | `num_dependentes` | "Quantas pessoas dependem financeiramente de você?" |
+| 5 | `tem_dividas` | "Você possui dívidas ativas no momento?" |
 
-| # | Dado coletado | Pergunta sugerida | Validação |
-|---|--------------|-------------------|-----------|
-| 1 | `renda_mensal` | "Para começarmos, qual é a sua renda mensal aproximada em reais?" | Número > 0 |
-| 2 | `tipo_emprego` | "Qual é a sua situação de emprego atual? (CLT/formal, autônomo ou desempregado)" | Uma das 3 opções |
-| 3 | `despesas_fixas` | "Quais são suas despesas fixas mensais aproximadas (aluguel, contas, etc.)?" | Número >= 0 |
-| 4 | `num_dependentes` | "Quantas pessoas dependem financeiramente de você?" | Inteiro >= 0 |
-| 5 | `tem_dividas` | "Você possui dívidas ativas no momento? (sim ou não)" | "sim" ou "não" |
+Após coletar as cinco respostas, o agente chama uma única vez:
 
-**Regras de validação:**
-- Se a resposta for inválida (ex: texto onde se espera número), o agente pede gentilmente para reformular.
-- Máximo de 2 tentativas por pergunta; se ainda inválido, usa valor padrão conservador (documentado abaixo).
-- Valores padrão conservadores (fallback):
-  - `renda_mensal`: 0 (sem renda declarada)
-  - `tipo_emprego`: `"desempregado"`
-  - `despesas_fixas`: 0
-  - `num_dependentes`: 3 (penaliza mais)
-  - `tem_dividas`: `"sim"` (penaliza mais)
+```text
+processar_entrevista_credito(
+    renda_mensal,
+    tipo_emprego,
+    despesas_fixas,
+    num_dependentes,
+    tem_dividas,
+)
+```
+
+O CPF não é perguntado nem enviado: ele é derivado da sessão autenticada.
 
 ---
 
-## 4. Fórmula de Cálculo do Score
+## 4. Tool Pública Consolidada
 
-Implementada exclusivamente na ferramenta `calcular_score` (não pelo LLM diretamente).
+```python
+def processar_entrevista_credito(
+    renda_mensal: float,
+    tipo_emprego: str,
+    despesas_fixas: float,
+    num_dependentes: int,
+    tem_dividas: str,
+    tool_context: ToolContext,
+) -> dict:
+    ...
+```
+
+A tool executa, nesta ordem:
+
+1. autoriza a sessão e deriva o CPF autenticado;
+2. valida e normaliza as cinco respostas;
+3. calcula o score pela fórmula oficial;
+4. limita o resultado ao intervalo de 0 a 1000;
+5. exige exatamente um cliente correspondente ao CPF da sessão;
+6. valida o score anteriormente persistido;
+7. altera somente `score_credito` desse cliente;
+8. publica `clientes.csv` atomicamente;
+9. retorna sucesso somente após a publicação.
+
+Estrutura pública do retorno:
+
+```python
+{
+    "processado": bool,
+    "perfil_atualizado": bool,
+    "retornar_credito": bool,
+    "campo_invalido": str | None,
+    "erro": str | None,
+}
+```
+
+O retorno não contém score calculado ou anterior, CPF, limite, status, fórmula,
+pesos, componentes ou as respostas completas.
+
+As funções `calcular_score` e `atualizar_score_cliente` permanecem no módulo
+somente para compatibilidade interna. Elas não são tools do agente.
+
+---
+
+## 5. Validação e Normalização
+
+### 5.1 Renda e despesas
+
+Aceitam números finitos maiores ou iguais a zero, inclusive representação
+numérica em texto. Rejeitam `None`, booleanos, texto não numérico, `NaN`,
+infinito e números negativos. Uma falha não inicia leitura ou escrita do CSV.
+
+### 5.2 Dependentes
+
+Aceita somente número inteiro não negativo, inclusive representação inteira em
+texto. Rejeita `None`, booleanos, texto não numérico, números negativos, `NaN`,
+infinito e valores fracionários. Três ou mais dependentes usam a chave de peso
+`3`.
+
+### 5.3 Emprego
+
+Somente as seguintes respostas são reconhecidas:
+
+| Normalizado | Respostas aceitas |
+|---|---|
+| `formal` | formal, clt, empregado, registrado, carteira assinada |
+| `autonomo` | autonomo, autônomo, mei, freelancer |
+| `desempregado` | desempregado, sem emprego |
+
+Uma resposta desconhecida é rejeitada. Não existe fallback implícito para
+`desempregado`.
+
+### 5.4 Dívidas
+
+| Normalizado | Respostas aceitas |
+|---|---|
+| `sim` | sim, s, tenho, possuo, yes |
+| `nao` | não, nao, n, não tenho, nao tenho, no |
+
+Uma resposta desconhecida é rejeitada. Ela nunca é convertida implicitamente
+em `nao`.
+
+---
+
+## 6. Fórmula Oficial
+
+Os pesos são importados de `config.py` e não podem ser fornecidos ou
+substituídos pelo LLM.
 
 ```python
 score_raw = (
     (renda_mensal / (despesas_fixas + 1)) * PESO_RENDA
     + PESO_EMPREGO[tipo_emprego]
-    + PESO_DEPENDENTES[num_dependentes_key]
-    + PESO_DIVIDAS[tem_dividas_key]
+    + PESO_DEPENDENTES[min(num_dependentes, 3)]
+    + PESO_DIVIDAS[tem_dividas]
 )
 
-# Clampar entre 0 e 1000
-score_final = max(SCORE_MIN, min(SCORE_MAX, round(score_raw)))
+score_final = max(0, min(1000, round(score_raw)))
 ```
 
-**Tabela de pesos (de `config.py`):**
+Exemplos de referência internos:
 
-```
-PESO_RENDA = 30
+- renda 5000, formal, despesas 2000, 1 dependente e sem dívidas: `555`;
+- renda 1500, autônomo, despesas 1200, 3 dependentes e com dívidas: `167`;
+- renda 0, desempregado, despesas 500, 0 dependentes e sem dívidas: `200`.
 
-PESO_EMPREGO:
-  "formal"       → 300
-  "autonomo"     → 200
-  "desempregado" → 0
-
-PESO_DEPENDENTES:
-  0 dependentes  → 100
-  1 dependente   → 80
-  2 dependentes  → 60
-  3+ dependentes → 30
-
-PESO_DIVIDAS:
-  "sim"          → -100
-  "nao"          → +100
-```
-
-**Normalização de `num_dependentes` para a tabela:**
-- `0` → chave `0`
-- `1` → chave `1`
-- `2` → chave `2`
-- `3` ou mais → chave `3` (usa `PESO_DEPENDENTES[3]`)
-
-**Normalização de `tipo_emprego` para a tabela:**
-- Aceita variações: `"clt"`, `"formal"`, `"empregado"` → `"formal"`
-- `"autônomo"`, `"autonomo"`, `"freelancer"`, `"mei"` → `"autonomo"`
-- `"desempregado"`, `"desemprego"`, `"sem emprego"` → `"desempregado"`
-
-**Normalização de `tem_dividas`:**
-- `"sim"`, `"s"`, `"yes"` → `"sim"`
-- `"não"`, `"nao"`, `"n"`, `"no"` → `"nao"`
+Esses valores podem ser verificados nos testes e no CSV temporário, mas não são
+devolvidos ao modelo nem apresentados ao cliente.
 
 ---
 
-## 5. Exemplos de Cálculo
+## 7. Persistência
 
-**Exemplo 1 — Perfil favorável:**
-- Renda: R$ 5.000, Formal, Despesas: R$ 2.000, 1 dependente, Sem dívidas
-- `score = (5000 / 2001) * 30 + 300 + 80 + 100`
-- `score = 74.96 + 300 + 80 + 100 = 554.96` → **555**
+Antes da escrita, `clientes.csv` deve existir, conter os cabeçalhos `cpf` e
+`score_credito`, possuir exatamente um cliente para o CPF autenticado e conter
+um score anterior inteiro entre 0 e 1000.
 
-**Exemplo 2 — Perfil desfavorável:**
-- Renda: R$ 1.500, Autônomo, Despesas: R$ 1.200, 3 dependentes, Com dívidas
-- `score = (1500 / 1201) * 30 + 200 + 30 + (-100)`
-- `score = 37.47 + 200 + 30 - 100 = 167.47` → **167**
+A publicação:
 
-**Exemplo 3 — Desempregado sem dívidas:**
-- Renda: R$ 0, Desempregado, Despesas: R$ 500, 0 dependentes, Sem dívidas
-- `score = (0 / 501) * 30 + 0 + 100 + 100`
-- `score = 0 + 0 + 100 + 100 = 200` → **200**
+- prepara um arquivo temporário no mesmo diretório do destino;
+- usa UTF-8 e não grava índice do DataFrame;
+- executa `flush` e `os.fsync` antes de fechar o temporário;
+- fecha o arquivo antes de `os.replace`;
+- remove o temporário após sucesso ou falha.
 
----
-
-## 6. Fluxo Detalhado
-
-```
-[Agente de Entrevista de Crédito recebe controle]
-    │
-    ▼
-"Para melhorar seu perfil de crédito, vou fazer algumas perguntas
- rápidas sobre sua situação financeira. Pode ficar à vontade!"
-    │
-    ▼
-Pergunta 1: Renda mensal → aguarda resposta → valida
-    │
-    ▼
-Pergunta 2: Tipo de emprego → aguarda resposta → valida
-    │
-    ▼
-Pergunta 3: Despesas fixas → aguarda resposta → valida
-    │
-    ▼
-Pergunta 4: Nº de dependentes → aguarda resposta → valida
-    │
-    ▼
-Pergunta 5: Dívidas ativas → aguarda resposta → valida
-    │
-    ▼
-Chama: calcular_score(renda, tipo_emprego, despesas, dependentes, tem_dividas)
-    │
-    ▼
-Chama: atualizar_score_cliente(cpf, novo_score)
-    │
-    ▼
-"Concluímos sua análise financeira! Com base nas informações fornecidas,
- seu perfil foi atualizado. Vou verificar agora se podemos aprovar
- seu aumento de limite."
-    │
-    ▼
-[Retorna controle ao Agente de Crédito]
-```
+Falha de preparação ou publicação preserva os bytes anteriores do destino e
+retorna erro controlado sem CPF ou stack trace.
 
 ---
 
-## 7. System Prompt do Agente de Entrevista de Crédito
+## 8. Agente ADK
 
+O agente expõe somente:
+
+```text
+processar_entrevista_credito
+encerrar_atendimento
 ```
-Você é o analista financeiro do Banco Ágil. Sua função é conduzir uma 
-entrevista amigável para entender melhor o perfil financeiro do cliente
-e ajudá-lo a melhorar suas condições de crédito.
 
-INSTRUÇÕES:
-1. Faça as perguntas UMA DE CADA VEZ, aguardando a resposta antes de avançar.
-2. Seja acolhedor e explique brevemente por que cada informação é importante.
-3. Se a resposta for inválida, peça gentilmente para reformular uma vez.
-4. Ao coletar todos os dados, use a ferramenta `calcular_score` para calcular o novo score.
-5. Use `atualizar_score_cliente` para salvar o novo score.
-6. Informe ao cliente que o perfil foi atualizado e que vai verificar o limite.
-7. NUNCA mencione valores numéricos do score ao cliente.
-8. NUNCA explique a fórmula ou os pesos do cálculo.
-9. Mantenha tom empático — o cliente está numa situação de rejeição de crédito.
+O schema destinado ao modelo contém exclusivamente:
 
-ORDEM DAS PERGUNTAS (obrigatória):
-1. Renda mensal (R$)
-2. Situação de emprego (formal/autônomo/desempregado)  
-3. Despesas fixas mensais (R$)
-4. Número de dependentes financeiros
-5. Possui dívidas ativas (sim/não)
-
-Após coletar tudo, calcule e salve o score, depois informe que o perfil
-foi atualizado e retorne o contexto para nova análise de crédito.
+```text
+renda_mensal
+tipo_emprego
+despesas_fixas
+num_dependentes
+tem_dividas
 ```
+
+`tool_context` é injetado pelo ADK e permanece oculto.
+
+O prompt proíbe o agente de calcular, pedir, revelar ou encaminhar score. Quando
+`campo_invalido` estiver preenchido, ele pede a correção desse campo. Quando a
+operação for concluída, informa que o perfil foi atualizado e sinaliza o
+retorno ao fluxo de crédito, sem declarar aprovação da solicitação.
 
 ---
 
-## 8. Ferramentas (Tools)
+## 9. Critérios de Aceitação
 
-### 8.1 `calcular_score`
-
-**Arquivo:** `tools/score_tools.py`
-
-```python
-def calcular_score(
-    renda_mensal: float,
-    tipo_emprego: str,
-    despesas_fixas: float,
-    num_dependentes: int,
-    tem_dividas: str
-) -> dict:
-    """
-    Calcula o novo score de crédito com base nos dados financeiros coletados.
-    
-    Args:
-        renda_mensal: Renda mensal em R$ (>= 0).
-        tipo_emprego: 'formal', 'autonomo' ou 'desempregado' (normalizado internamente).
-        despesas_fixas: Despesas fixas mensais em R$ (>= 0).
-        num_dependentes: Número de dependentes (>= 0).
-        tem_dividas: 'sim' ou 'nao' (normalizado internamente).
-    
-    Returns:
-        dict:
-            - score (int): novo score calculado (0-1000)
-            - detalhes (dict): componentes do cálculo para debug interno
-            - erro (str | None)
-    """
-```
-
-**Lógica:**
-1. Normalizar `tipo_emprego`, `tem_dividas` conforme tabelas da Seção 4.
-2. Determinar chave de `num_dependentes` (min(num_dependentes, 3)).
-3. Aplicar fórmula.
-4. Clampar resultado em `[0, 1000]`.
-5. Retornar `score` (int) + `detalhes` dos componentes.
-
----
-
-### 8.2 `atualizar_score_cliente`
-
-**Arquivo:** `tools/score_tools.py`
-
-```python
-def atualizar_score_cliente(cpf: str, novo_score: int) -> dict:
-    """
-    Atualiza o score de crédito do cliente em clientes.csv.
-    
-    Args:
-        cpf: CPF do cliente (normalizado).
-        novo_score: Novo score calculado (0-1000).
-    
-    Returns:
-        dict:
-            - atualizado (bool)
-            - score_anterior (int): score antes da atualização
-            - score_novo (int): score após atualização
-            - erro (str | None)
-    """
-```
-
-**Lógica:**
-1. Ler `clientes.csv`.
-2. Localizar linha pelo CPF.
-3. Guardar `score_anterior` para retorno.
-4. Atualizar `score_credito` com `novo_score`.
-5. Reescrever CSV.
-6. Retornar confirmação com ambos os valores.
-
----
-
-## 9. Definição ADK do Agente
-
-```python
-# agents/entrevista_credito.py (estrutura)
-
-from google.adk.agents import Agent
-from tools.score_tools import calcular_score, atualizar_score_cliente
-from tools.auth_tools import encerrar_atendimento
-
-agente_entrevista_credito = Agent(
-    name="agente_entrevista_credito",
-    model="gemini-2.0-flash",
-    description="Analista financeiro: conduz entrevista, calcula novo score e atualiza perfil do cliente.",
-    instruction=SYSTEM_PROMPT_ENTREVISTA,
-    tools=[
-        calcular_score,
-        atualizar_score_cliente,
-        encerrar_atendimento,
-    ],
-)
-```
-
-> Este agente **não tem sub-agentes**. Após concluir, o ADK retorna automaticamente ao agente pai (Agente de Crédito) via mecanismo de handoff do `sub_agents`.
-
----
-
-## 10. Tratamento de Erros
-
-| Cenário | Comportamento |
-|---------|--------------|
-| Resposta inválida a uma pergunta (1ª vez) | Agente pede para reformular com dica do formato esperado |
-| Resposta ainda inválida (2ª vez) | Usa valor padrão conservador e avança para próxima pergunta |
-| `clientes.csv` indisponível na atualização | Ferramenta retorna `erro`; agente informa: "Houve uma instabilidade ao salvar seu perfil. Tente novamente em instantes." |
-| Score calculado negativo | Clampado para 0 automaticamente |
-| Score calculado > 1000 | Clampado para 1000 automaticamente |
-| Cliente deseja encerrar durante entrevista | Agente usa `encerrar_atendimento` e agradece pela participação |
-
----
-
-## 11. Critérios de Aceitação
-
-- [ ] Agente faz exatamente 5 perguntas, uma por vez, na ordem definida.
-- [ ] Resposta inválida gera pedido de reformulação (apenas uma vez por pergunta).
-- [ ] Segunda resposta inválida aplica fallback conservador sem bloquear o fluxo.
-- [ ] `calcular_score` aplica a fórmula corretamente para os 3 exemplos da Seção 5.
-- [ ] Score é sempre um inteiro entre 0 e 1000 inclusive.
-- [ ] `atualizar_score_cliente` persiste o novo score em `clientes.csv`.
-- [ ] Agente NÃO revela o valor numérico do score ao cliente.
-- [ ] Agente NÃO explica a fórmula ou os pesos ao cliente.
-- [ ] Após atualização, agente informa que o perfil foi revisado.
-- [ ] Controle retorna ao Agente de Crédito para nova análise (handoff ADK).
-- [ ] Normalização de tipo de emprego funciona para variações comuns ("clt", "autônomo", "MEI").
-- [ ] Normalização de dívidas funciona para variações ("s", "n", "não", "yes").
+- [ ] Uma única tool pública consolida validação, cálculo e persistência.
+- [ ] CPF e score não são argumentos controlados pelo LLM.
+- [ ] O score não aparece no retorno público nem no schema do modelo.
+- [ ] Normalizações desconhecidas são rejeitadas sem escrita.
+- [ ] A fórmula e os pesos oficiais são usados pelo código.
+- [ ] Somente o cliente autenticado tem `score_credito` atualizado.
+- [ ] A publicação de `clientes.csv` é atômica por arquivo.
+- [ ] Falhas preservam o arquivo anterior e não deixam temporários.
+- [ ] O agente expõe somente a tool consolidada e o encerramento.
+- [ ] O cliente é informado de que o perfil foi atualizado, sem receber o score.
+- [ ] Não se afirma que o handoff real já foi testado.
