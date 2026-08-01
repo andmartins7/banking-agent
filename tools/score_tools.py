@@ -1,10 +1,14 @@
-"""
-Ferramentas de score de crédito do Banco Ágil.
+"""Ferramentas determinísticas para a entrevista de crédito do Banco Ágil.
 
-Funções expostas como tools do Google ADK:
-    - calcular_score
-    - atualizar_score_cliente
+O agente expõe somente ``processar_entrevista_credito``. As funções
+``calcular_score`` e ``atualizar_score_cliente`` permanecem disponíveis apenas
+para compatibilidade interna com integrações anteriores.
 """
+
+import math
+import os
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 from google.adk.tools.tool_context import ToolContext
@@ -21,6 +25,17 @@ from config import (
 from session_state import ErroAutorizacaoSessao, obter_cpf_autorizado
 
 
+_CAMPOS_CLIENTES_OBRIGATORIOS = {"cpf", "score_credito"}
+
+
+class _ErroCampoEntrevista(ValueError):
+    """Falha controlada associada a uma resposta específica da entrevista."""
+
+    def __init__(self, campo: str, mensagem: str):
+        super().__init__(mensagem)
+        self.campo = campo
+
+
 # ── Helpers de normalização ────────────────────────────────────────────────
 
 def _normalizar_tipo_emprego(tipo: str) -> str:
@@ -32,15 +47,7 @@ def _normalizar_tipo_emprego(tipo: str) -> str:
         "autônomo", "freelancer", "MEI" → "autonomo"
         "desempregado", "sem emprego" → "desempregado"
     """
-    t = tipo.strip().lower()
-    formais = {"formal", "clt", "empregado", "efetivado", "registrado"}
-    autonomos = {"autonomo", "autônomo", "freelancer", "mei", "free", "autonomo"}
-    if t in formais:
-        return "formal"
-    if t in autonomos:
-        return "autonomo"
-    # Qualquer outra string → desempregado (fallback conservador)
-    return "desempregado"
+    return _normalizar_emprego_estrito(tipo)
 
 
 def _normalizar_tem_dividas(resposta: str) -> str:
@@ -51,11 +58,260 @@ def _normalizar_tem_dividas(resposta: str) -> str:
         "sim", "s", "yes", "tenho" → "sim"
         "não", "nao", "n", "no", "não tenho" → "nao"
     """
-    r = resposta.strip().lower()
-    positivos = {"sim", "s", "yes", "y", "tenho", "possuo", "true", "1"}
-    if r in positivos or r.startswith("sim") or r.startswith("tenho"):
+    return _normalizar_dividas_estrito(resposta)
+
+
+def _validar_numero_nao_negativo(valor: object, campo: str) -> float:
+    """Valida um número real, finito e não negativo sem aceitar booleanos."""
+    if valor is None or isinstance(valor, bool):
+        raise _ErroCampoEntrevista(
+            campo,
+            f"Informe um valor numérico válido para {campo}.",
+        )
+
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError) as e:
+        raise _ErroCampoEntrevista(
+            campo,
+            f"Informe um valor numérico válido para {campo}.",
+        ) from e
+    if not math.isfinite(numero) or numero < 0:
+        raise _ErroCampoEntrevista(
+            campo,
+            f"Informe um valor finito e não negativo para {campo}.",
+        )
+    return numero
+
+
+def _validar_dependentes(valor: object) -> int:
+    """Valida dependentes como inteiro não negativo, inclusive texto numérico."""
+    if valor is None or isinstance(valor, bool):
+        raise _ErroCampoEntrevista(
+            "num_dependentes",
+            "Informe um número inteiro válido de dependentes.",
+        )
+
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError) as e:
+        raise _ErroCampoEntrevista(
+            "num_dependentes",
+            "Informe um número inteiro válido de dependentes.",
+        ) from e
+    if not math.isfinite(numero) or numero < 0 or not numero.is_integer():
+        raise _ErroCampoEntrevista(
+            "num_dependentes",
+            "Informe um número inteiro não negativo de dependentes.",
+        )
+    return int(numero)
+
+
+def _normalizar_emprego_estrito(valor: object) -> str:
+    """Normaliza somente respostas de emprego reconhecidas pelo contrato."""
+    if not isinstance(valor, str):
+        raise _ErroCampoEntrevista(
+            "tipo_emprego",
+            "Informe uma situação de emprego válida.",
+        )
+
+    resposta = " ".join(valor.strip().lower().split())
+    aliases = {
+        "formal": "formal",
+        "clt": "formal",
+        "empregado": "formal",
+        "registrado": "formal",
+        "carteira assinada": "formal",
+        "autonomo": "autonomo",
+        "autônomo": "autonomo",
+        "mei": "autonomo",
+        "freelancer": "autonomo",
+        "desempregado": "desempregado",
+        "sem emprego": "desempregado",
+    }
+    normalizado = aliases.get(resposta)
+    if normalizado is None:
+        raise _ErroCampoEntrevista(
+            "tipo_emprego",
+            "Situação de emprego não reconhecida.",
+        )
+    return normalizado
+
+
+def _normalizar_dividas_estrito(valor: object) -> str:
+    """Normaliza somente respostas explícitas e reconhecidas sobre dívidas."""
+    if not isinstance(valor, str):
+        raise _ErroCampoEntrevista(
+            "tem_dividas",
+            "Informe se possui dívidas usando uma resposta reconhecida.",
+        )
+
+    resposta = " ".join(valor.strip().lower().split())
+    positivos = {"sim", "s", "tenho", "possuo", "yes"}
+    negativos = {"não", "nao", "n", "não tenho", "nao tenho", "no"}
+    if resposta in positivos:
         return "sim"
-    return "nao"
+    if resposta in negativos:
+        return "nao"
+    raise _ErroCampoEntrevista(
+        "tem_dividas",
+        "Resposta sobre dívidas não reconhecida.",
+    )
+
+
+def _calcular_score_oficial(
+    renda_mensal: float,
+    tipo_emprego: str,
+    despesas_fixas: float,
+    num_dependentes: int,
+    tem_dividas: str,
+) -> int:
+    """Aplica a fórmula e os pesos oficiais sem expor componentes ao agente."""
+    score_raw = (
+        (renda_mensal / (despesas_fixas + 1)) * PESO_RENDA
+        + PESO_EMPREGO[tipo_emprego]
+        + PESO_DEPENDENTES[min(num_dependentes, 3)]
+        + PESO_DIVIDAS[tem_dividas]
+    )
+    return max(SCORE_MIN, min(SCORE_MAX, round(score_raw)))
+
+
+def _score_persistido_valido(valor: object) -> bool:
+    """Confirma que o score anterior é inteiro e pertence ao intervalo oficial."""
+    try:
+        numero = float(str(valor).strip())
+    except (TypeError, ValueError):
+        return False
+    return (
+        math.isfinite(numero)
+        and numero.is_integer()
+        and SCORE_MIN <= numero <= SCORE_MAX
+    )
+
+
+def _escrever_clientes_atomico(dataframe: pd.DataFrame, destino: Path) -> None:
+    """Publica clientes.csv por substituição atômica no mesmo diretório."""
+    destino = Path(destino)
+    temporario = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=destino.parent,
+            prefix=f".{destino.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as arquivo:
+            temporario = Path(arquivo.name)
+            dataframe.to_csv(arquivo, index=False)
+            arquivo.flush()
+            os.fsync(arquivo.fileno())
+        os.replace(temporario, destino)
+    finally:
+        if temporario is not None and temporario.exists():
+            temporario.unlink()
+
+
+def _resultado_entrevista_erro(
+    mensagem: str,
+    campo_invalido: str | None = None,
+) -> dict:
+    """Cria o retorno público controlado de uma entrevista não processada."""
+    return {
+        "processado": False,
+        "perfil_atualizado": False,
+        "retornar_credito": False,
+        "campo_invalido": campo_invalido,
+        "erro": mensagem,
+    }
+
+
+def processar_entrevista_credito(
+    renda_mensal: float,
+    tipo_emprego: str,
+    despesas_fixas: float,
+    num_dependentes: int,
+    tem_dividas: str,
+    tool_context: ToolContext,
+) -> dict:
+    """Valida a entrevista, calcula o score e publica o perfil atualizado."""
+    try:
+        cpf = obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao as e:
+        return _resultado_entrevista_erro(str(e))
+
+    try:
+        renda = _validar_numero_nao_negativo(renda_mensal, "renda_mensal")
+        emprego = _normalizar_emprego_estrito(tipo_emprego)
+        despesas = _validar_numero_nao_negativo(
+            despesas_fixas,
+            "despesas_fixas",
+        )
+        dependentes = _validar_dependentes(num_dependentes)
+        dividas = _normalizar_dividas_estrito(tem_dividas)
+    except _ErroCampoEntrevista as e:
+        return _resultado_entrevista_erro(str(e), e.campo)
+
+    score_final = _calcular_score_oficial(
+        renda,
+        emprego,
+        despesas,
+        dependentes,
+        dividas,
+    )
+
+    try:
+        destino = Path(CSV_CLIENTES)
+        if not destino.is_file():
+            raise FileNotFoundError
+
+        clientes = pd.read_csv(destino, dtype=str)
+        if not _CAMPOS_CLIENTES_OBRIGATORIOS.issubset(clientes.columns):
+            raise ValueError("CSV de clientes malformado")
+
+        cpfs = clientes["cpf"].fillna("").astype(str).str.strip()
+        mascara = cpfs == cpf
+        quantidade = int(mascara.sum())
+        if quantidade == 0:
+            return _resultado_entrevista_erro(
+                "Cliente autenticado não encontrado.",
+            )
+        if quantidade != 1:
+            return _resultado_entrevista_erro(
+                "Cadastro duplicado para o cliente autenticado.",
+            )
+
+        score_anterior = clientes.loc[mascara, "score_credito"].iloc[0]
+        if not _score_persistido_valido(score_anterior):
+            raise ValueError("CSV de clientes malformado")
+
+        clientes.loc[mascara, "score_credito"] = str(score_final)
+        _escrever_clientes_atomico(clientes, destino)
+    except FileNotFoundError:
+        return _resultado_entrevista_erro(
+            "Base de clientes não encontrada.",
+        )
+    except (KeyError, pd.errors.EmptyDataError, pd.errors.ParserError, ValueError):
+        return _resultado_entrevista_erro(
+            "Base de clientes inválida para atualização do perfil.",
+        )
+    except Exception as e:
+        print(
+            "[TOOL ERROR] processar_entrevista_credito: "
+            f"{type(e).__name__}"
+        )
+        return _resultado_entrevista_erro(
+            "Não foi possível atualizar o perfil. Tente novamente.",
+        )
+
+    return {
+        "processado": True,
+        "perfil_atualizado": True,
+        "retornar_credito": True,
+        "campo_invalido": None,
+        "erro": None,
+    }
 
 
 # ── Tools ──────────────────────────────────────────────────────────────────
