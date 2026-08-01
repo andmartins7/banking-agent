@@ -159,6 +159,49 @@ def _normalizar_dividas_estrito(valor: object) -> str:
     )
 
 
+_VALIDADORES_RESPOSTA_ENTREVISTA = {
+    "renda_mensal": lambda valor: _validar_numero_nao_negativo(
+        valor,
+        "renda_mensal",
+    ),
+    "tipo_emprego": _normalizar_emprego_estrito,
+    "despesas_fixas": lambda valor: _validar_numero_nao_negativo(
+        valor,
+        "despesas_fixas",
+    ),
+    "num_dependentes": _validar_dependentes,
+    "tem_dividas": _normalizar_dividas_estrito,
+}
+
+
+def validar_resposta_entrevista(campo: str, valor_bruto: object) -> dict:
+    """Valida e normaliza uma única resposta financeira, sem efeitos externos."""
+    if (
+        not isinstance(campo, str)
+        or campo not in _VALIDADORES_RESPOSTA_ENTREVISTA
+    ):
+        return {
+            "valida": False,
+            "valor_normalizado": None,
+            "erro": "Campo da entrevista desconhecido.",
+        }
+
+    try:
+        valor_normalizado = _VALIDADORES_RESPOSTA_ENTREVISTA[campo](valor_bruto)
+    except _ErroCampoEntrevista as e:
+        return {
+            "valida": False,
+            "valor_normalizado": None,
+            "erro": str(e),
+        }
+
+    return {
+        "valida": True,
+        "valor_normalizado": valor_normalizado,
+        "erro": None,
+    }
+
+
 def _calcular_score_oficial(
     renda_mensal: float,
     tipo_emprego: str,
@@ -241,24 +284,45 @@ def processar_entrevista_credito(
     except ErroAutorizacaoSessao as e:
         return _resultado_entrevista_erro(str(e))
 
-    try:
-        renda = _validar_numero_nao_negativo(renda_mensal, "renda_mensal")
-        emprego = _normalizar_emprego_estrito(tipo_emprego)
-        despesas = _validar_numero_nao_negativo(
-            despesas_fixas,
-            "despesas_fixas",
-        )
-        dependentes = _validar_dependentes(num_dependentes)
-        dividas = _normalizar_dividas_estrito(tem_dividas)
-    except _ErroCampoEntrevista as e:
-        return _resultado_entrevista_erro(str(e), e.campo)
+    return processar_entrevista_credito_autorizada(
+        cpf=cpf,
+        renda_mensal=renda_mensal,
+        tipo_emprego=tipo_emprego,
+        despesas_fixas=despesas_fixas,
+        num_dependentes=num_dependentes,
+        tem_dividas=tem_dividas,
+    )
+
+
+def processar_entrevista_credito_autorizada(
+    cpf: str,
+    renda_mensal: float,
+    tipo_emprego: str,
+    despesas_fixas: float,
+    num_dependentes: int,
+    tem_dividas: str,
+) -> dict:
+    """Executa o processamento financeiro para uma identidade já autorizada."""
+    respostas_brutas = {
+        "renda_mensal": renda_mensal,
+        "tipo_emprego": tipo_emprego,
+        "despesas_fixas": despesas_fixas,
+        "num_dependentes": num_dependentes,
+        "tem_dividas": tem_dividas,
+    }
+    respostas_normalizadas = {}
+    for campo, valor_bruto in respostas_brutas.items():
+        validacao = validar_resposta_entrevista(campo, valor_bruto)
+        if not validacao["valida"]:
+            return _resultado_entrevista_erro(validacao["erro"], campo)
+        respostas_normalizadas[campo] = validacao["valor_normalizado"]
 
     score_final = _calcular_score_oficial(
-        renda,
-        emprego,
-        despesas,
-        dependentes,
-        dividas,
+        respostas_normalizadas["renda_mensal"],
+        respostas_normalizadas["tipo_emprego"],
+        respostas_normalizadas["despesas_fixas"],
+        respostas_normalizadas["num_dependentes"],
+        respostas_normalizadas["tem_dividas"],
     )
 
     try:
