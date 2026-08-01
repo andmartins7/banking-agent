@@ -214,11 +214,18 @@ class CreditRequestProcessingTests(unittest.TestCase):
 
         self.assertIn("status", resultado["erro"].lower())
 
-    def test_06_solicitacao_aprovada_nao_e_reprocessada(self):
+    def test_06_solicitacao_aprovada_com_limite_ja_aplicado_nao_e_reprocessada(self):
+        clientes = self._read_csv(self.clientes_path)
+        clientes[0]["limite_credito"] = "3000.00"
+        self._write_clientes(clientes)
         self._write_solicitacoes([
             self._solicitacao(status="aprovado"),
         ])
-        self._assert_bloqueado_sem_escrita()
+
+        with patch("tools.credito_tools._escrever_csv_atomico") as escrever:
+            self._assert_bloqueado_sem_escrita()
+
+        escrever.assert_not_called()
 
     def test_07_solicitacao_rejeitada_nao_e_reprocessada(self):
         self._write_solicitacoes([
