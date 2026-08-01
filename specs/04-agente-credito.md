@@ -18,9 +18,9 @@ O Agente de Crédito é acionado após autenticação bem-sucedida pelo Agente d
 1. Consultar e informar o limite de crédito atual do cliente.
 2. Receber solicitação de novo limite desejado.
 3. Registrar o pedido em `solicitacoes_aumento_limite.csv` com status `'pendente'`.
-4. Checar se o score do cliente permite o novo limite via `score_limite.csv`.
-5. Atualizar o status do pedido para `'aprovado'` ou `'rejeitado'`.
-6. Se aprovado: atualizar `limite_credito` do cliente em `clientes.csv`.
+4. Processar a solicitação pendente por timestamp em uma única tool determinística.
+5. Deixar a tool decidir o status `'aprovado'` ou `'rejeitado'` sem argumento do modelo.
+6. Se aprovado: aplicar em `clientes.csv` exatamente o valor persistido na solicitação.
 7. Se rejeitado: oferecer redirecionamento para o Agente de Entrevista de Crédito.
 8. Receber cliente retornado da Entrevista de Crédito e processar nova análise.
 
@@ -62,18 +62,18 @@ Chama: registrar_solicitacao(novo_limite, tool_context)
     └── REGISTRADO (`pendente`, com `data_hora`)
             │
             ▼
-        Chama: checar_score_para_limite(novo_limite, tool_context)
+        Chama: processar_solicitacao(data_hora, tool_context)
             │
-            ├── ERRO → não atualiza status; informa que a análise não foi concluída
+            ├── ERRO → não comunica rejeição; informa que o processamento não foi concluído
             │
             ├── APROVADO
-            │       ├── atualizar_status_solicitacao(data_hora, "aprovado", tool_context)
-            │       ├── atualizar_limite_cliente(novo_limite, tool_context)
-            │       └── comunica o novo limite
+            │       ├── tool persiste status `aprovado`
+            │       ├── tool aplica o valor obtido da própria solicitação
+            │       └── agente comunica `novo_limite` retornado
             │
-            └── REJEITADO (`erro=None`, inclusive sem faixa de cobertura)
-                    ├── atualizar_status_solicitacao(data_hora, "rejeitado", tool_context)
-                    └── comunica a decisão sem expor score ou faixa e oferece entrevista
+            └── REJEITADO (inclusive sem faixa de cobertura)
+                    ├── tool persiste somente status `rejeitado`
+                    └── agente comunica a decisão e oferece entrevista
 ```
 
 ### 3.3 Retorno da Entrevista de Crédito
@@ -95,19 +95,20 @@ As ferramentas identificam o cliente exclusivamente pelo estado autenticado da s
 Suas responsabilidades:
 1. Consultar e informar o limite de crédito atual quando solicitado.
 2. Processar solicitações de aumento de limite.
-3. Ao receber um valor desejado, usar `registrar_solicitacao` como autoridade da
-   validação e, somente em sucesso, usar `checar_score_para_limite`.
+3. Ao receber um valor desejado, usar `registrar_solicitacao` e, somente em sucesso,
+   chamar `processar_solicitacao` com o timestamp retornado.
 4. Comunicar o resultado de forma clara e amigável.
 5. Se rejeitado, oferecer ao cliente a opção de entrevista financeira para 
    melhorar o score, transferindo para o especialista se aceito.
 6. Se o cliente retornar da entrevista, verificar o novo score e oferecer nova análise.
 
 REGRAS:
-- CPF, limite atual e score atual nunca são argumentos fornecidos pelo modelo.
+- CPF, novo limite, limite atual, score e status nunca são argumentos fornecidos pelo
+  modelo a `processar_solicitacao`.
 - Se o registro rejeitar o valor, solicite outro valor e não prossiga.
-- Se a análise retornar erro, não atualize o status.
-- Use somente os status finais `aprovado` e `rejeitado`.
-- Nunca aprove ou rejeite manualmente — use sempre as ferramentas.
+- Se o processamento retornar erro, não comunique o resultado como rejeição.
+- O status final e o valor aplicado são decididos exclusivamente pela tool.
+- Nunca aprove ou rejeite manualmente.
 - Não mencione scores, tabelas internas ou nomes de sistemas ao cliente.
 - Tom: profissional, claro e empático.
 - Se o cliente quiser encerrar, use a ferramenta `encerrar_atendimento`.
@@ -178,106 +179,44 @@ def registrar_solicitacao(
 
 ---
 
-### 5.3 `checar_score_para_limite`
+### 5.3 `processar_solicitacao`
 
 **Arquivo:** `tools/credito_tools.py`
 
 ```python
-def checar_score_para_limite(
-    novo_limite: float,
-    tool_context: ToolContext,
-) -> dict:
-    """
-    Verifica se o score do cliente permite o novo limite solicitado.
-    
-    Args:
-        novo_limite: Novo limite de crédito solicitado.
-        tool_context: Contexto ADK da sessão autenticada.
-    
-    Returns:
-        dict:
-            - aprovado (bool): True se score suficiente, False caso contrário.
-            - score_minimo_necessario (int | None): score mínimo da faixa.
-            - limite_maximo_faixa (float | None): cobertura da faixa encontrada.
-            - limite_coberto (bool): indica se a tabela cobre o valor.
-            - erro (str | None)
-    """
-```
-
-**Lógica:**
-1. Autorizar a sessão e obter limite atual e score persistidos em `clientes.csv`.
-2. Revalidar o novo limite com a mesma regra determinística do registro.
-3. Ordenar `score_limite.csv` por `limite_maximo` crescente e usar a primeira faixa que cobre o valor.
-4. Comparar o score persistido com `score_minimo`, sem expor o score ao modelo.
-5. Se nenhuma faixa cobrir um limite válido, retornar `aprovado=False`, `limite_coberto=False` e `erro=None`; essa rejeição de negócio permite finalizar a solicitação como `rejeitado` e nunca reutiliza automaticamente a última faixa.
-6. Representar separadamente falhas técnicas da tabela com `erro != None`; nesses casos, não finalizar a solicitação.
-
----
-
-### 5.4 `atualizar_status_solicitacao`
-
-**Arquivo:** `tools/credito_tools.py`
-
-```python
-def atualizar_status_solicitacao(
+def processar_solicitacao(
     data_hora_solicitacao: str,
-    novo_status: str,
     tool_context: ToolContext,
 ) -> dict:
     """
-    Atualiza o status de uma solicitação existente em solicitacoes_aumento_limite.csv.
+    Decide e aplica deterministicamente uma solicitação pendente.
     
     Args:
-        data_hora_solicitacao: Timestamp ISO 8601 da solicitação (chave de busca).
-        novo_status: Novo status ('aprovado' ou 'rejeitado').
+        data_hora_solicitacao: Timestamp retornado pelo registro.
         tool_context: Contexto ADK da sessão autenticada.
     
     Returns:
         dict:
-            - atualizado (bool)
-            - status_anterior (str | None)
-            - status_novo (str | None)
+            - processado (bool)
+            - status_pedido (str | None): `aprovado` ou `rejeitado`
+            - limite_atualizado (bool)
+            - novo_limite (float | None): somente o valor efetivamente aplicado
+            - oferecer_entrevista (bool)
             - erro (str | None)
     """
 ```
 
 **Lógica:**
-1. Aceitar como destino somente `aprovado` ou `rejeitado`; `reprovado` é apenas sinônimo textual de entrada e normaliza para `rejeitado`.
-2. Localizar exatamente uma linha pelo CPF da sessão e pelo timestamp.
-3. Permitir somente `pendente → aprovado` ou `pendente → rejeitado`.
-4. Rejeitar destino `pendente`, status arbitrário, duplicidade e reprocessamento de solicitação finalizada.
-5. Validar tudo antes de reescrever o CSV.
+1. Autorizar a sessão e localizar exatamente uma solicitação pelo CPF autenticado e timestamp.
+2. Exigir status `pendente`, cliente único e correspondência entre o limite atual do cliente e o snapshot da solicitação.
+3. Obter `novo_limite_solicitado` do registro e revalidá-lo antes de qualquer escrita.
+4. Consultar `score_limite.csv` e decidir o status sem receber score, faixa ou status do modelo.
+5. Em rejeição, atualizar somente a solicitação e oferecer entrevista.
+6. Em aprovação, atualizar a solicitação e aplicar exatamente o valor registrado ao cliente.
+7. Bloquear sem escrita solicitações ou clientes ausentes/duplicados, dados inválidos, sessão não autorizada e CSVs ausentes/malformados.
+8. Não retornar CPF, score, score mínimo, faixa ou critérios da política.
 
----
-
-### 5.5 `atualizar_limite_cliente`
-
-**Arquivo:** `tools/credito_tools.py`
-
-```python
-def atualizar_limite_cliente(
-    novo_limite: float,
-    tool_context: ToolContext,
-) -> dict:
-    """
-    Atualiza o limite de crédito do cliente em clientes.csv após aprovação.
-    
-    Args:
-        novo_limite: Novo limite aprovado.
-        tool_context: Contexto ADK da sessão autenticada.
-    
-    Returns:
-        dict:
-            - atualizado (bool)
-            - erro (str | None)
-    """
-```
-
-**Lógica:**
-1. Ler `clientes.csv`.
-2. Localizar linha pelo CPF.
-3. Atualizar coluna `limite_credito`.
-4. Reescrever CSV.
+As funções de baixo nível `checar_score_para_limite`, `atualizar_status_solicitacao` e `atualizar_limite_cliente` permanecem no módulo apenas para compatibilidade interna e não são tools do agente.
 
 ---
 
@@ -290,9 +229,7 @@ from google.adk.agents import Agent
 from tools.credito_tools import (
     consultar_limite,
     registrar_solicitacao,
-    checar_score_para_limite,
-    atualizar_status_solicitacao,
-    atualizar_limite_cliente,
+    processar_solicitacao,
 )
 from tools.auth_tools import encerrar_atendimento
 from agents.entrevista_credito import agente_entrevista_credito
@@ -305,9 +242,7 @@ agente_credito = Agent(
     tools=[
         consultar_limite,
         registrar_solicitacao,
-        checar_score_para_limite,
-        atualizar_status_solicitacao,
-        atualizar_limite_cliente,
+        processar_solicitacao,
         encerrar_atendimento,
     ],
     sub_agents=[agente_entrevista_credito],
@@ -323,13 +258,15 @@ agente_credito = Agent(
 | CSV de solicitações não existe | `registrar_solicitacao` cria o arquivo somente após validar o valor |
 | Novo limite nulo, booleano, não numérico, não finito ou ≤ 0 | Ferramenta retorna `registrado=False` sem criar ou modificar o CSV |
 | Novo limite ≤ limite atual | Ferramenta rejeita deterministicamente e o agente solicita novo valor |
-| Novo limite válido fora da cobertura de `score_limite.csv` | Rejeição de negócio com `aprovado=False`, `limite_coberto=False` e `erro=None`; status transita de `pendente` para `rejeitado` |
-| `score_limite.csv` não encontrado | Ferramenta retorna `erro`; agente informa instabilidade temporária |
+| Novo limite válido fora da cobertura de `score_limite.csv` | `processar_solicitacao` decide `rejeitado`, atualiza somente a solicitação e oferece entrevista |
+| `score_limite.csv` não encontrado | Processamento retorna `erro` sem escrita; agente não comunica rejeição |
 | `novo_limite` não é número válido | Agente pede para informar um valor numérico (ex: "5000" ou "5000.00") |
-| `clientes.csv` corrompido na atualização | Ferramenta retorna `erro`; agente informa e sugere tentar novamente |
-| Status de entrada `reprovado` | Normalizado e persistido como `rejeitado` |
+| Snapshot da solicitação diverge do limite do cliente | Processamento bloqueado sem escrita |
+| CSV ausente ou malformado | Processamento retorna erro controlado sem escrita |
+| Status persistido diferente de `pendente`, `aprovado` ou `rejeitado` | Processamento bloqueado sem escrita |
 | Solicitação já finalizada | Reprocessamento rejeitado sem escrita |
 | CPF + timestamp duplicados | Erro de integridade sem escrita |
+| Cliente ausente ou duplicado | Erro controlado sem escrita |
 
 ---
 
@@ -340,16 +277,17 @@ agente_credito = Agent(
 - [ ] Novo limite igual ou menor que o atual é rejeitado pela tool com mensagem controlada.
 - [ ] Solicitação é registrada em CSV com status `'pendente'` antes da checagem.
 - [ ] Timestamp do registro usa ISO 8601 UTC com microssegundos e offset explícito.
-- [ ] Limite válido fora da cobertura da tabela é rejeitado sem erro técnico, finaliza o status como `'rejeitado'` e não usa a última faixa como fallback.
-- [ ] Score suficiente → status atualizado para `'aprovado'` + `clientes.csv` atualizado.
-- [ ] Score insuficiente → status atualizado para `'rejeitado'`.
+- [ ] Limite válido fora da cobertura da tabela é finalizado como `'rejeitado'` por `processar_solicitacao`.
+- [ ] Score suficiente → tool atualiza status para `'aprovado'` e aplica o valor registrado ao cliente.
+- [ ] Score insuficiente → tool atualiza somente o status para `'rejeitado'`.
 - [ ] Somente `pendente → aprovado` e `pendente → rejeitado` são permitidas.
-- [ ] `reprovado` é aceito somente como sinônimo de entrada e persiste como `rejeitado`.
 - [ ] Solicitação finalizada ou chave duplicada não é reprocessada.
+- [ ] Snapshot divergente e cliente ausente ou duplicado bloqueiam o processamento sem escrita.
 - [ ] Rejeição oferece opção de entrevista de crédito.
 - [ ] Aceite de entrevista faz handoff invisível para Agente de Entrevista.
 - [ ] Recusa de entrevista encerra ou oferece outras opções sem forçar.
 - [ ] Após retorno da entrevista, agente oferece nova análise de limite.
-- [ ] Nenhuma aprovação/rejeição manual pelo LLM — sempre via ferramentas.
-- [ ] CPF, limite atual e score atual nunca são argumentos fornecidos pelo LLM.
+- [ ] Nenhuma aprovação/rejeição manual pelo LLM — a tool decide o status final.
+- [ ] CPF, novo limite, limite atual, score e status não são argumentos de `processar_solicitacao`.
+- [ ] O agente expõe somente `consultar_limite`, `registrar_solicitacao`, `processar_solicitacao` e `encerrar_atendimento`.
 - [ ] Todas as operações CSV são persistidas corretamente.

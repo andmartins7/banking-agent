@@ -9,9 +9,7 @@ from google.adk.agents import Agent
 from tools.credito_tools import (
     consultar_limite,
     registrar_solicitacao,
-    checar_score_para_limite,
-    atualizar_status_solicitacao,
-    atualizar_limite_cliente,
+    processar_solicitacao,
 )
 from tools.auth_tools import encerrar_atendimento
 from agents.entrevista_credito import agente_entrevista_credito
@@ -40,17 +38,14 @@ Passo 3: Chame `registrar_solicitacao` somente com o novo limite solicitado.
          Se retornar `registrado=false` ou `erro`, não prossiga: explique sem detalhes
          internos e solicite um novo valor ao cliente.
          Guarde o campo "data_hora" retornado — você precisará dele depois.
-Passo 4: Chame `checar_score_para_limite` somente com o novo limite.
-         Se retornar `erro`, não atualize o status da solicitação nem revele score ou
-         faixa; informe que não foi possível concluir a análise.
-         Se retornar `erro=null` e `aprovado=false`, inclusive com
-         `limite_coberto=false`, siga o fluxo normal de rejeição.
-Passo 5A (APROVADO): 
-  - Chame `atualizar_status_solicitacao` com data_hora e status "aprovado".
-  - Chame `atualizar_limite_cliente` somente com o novo limite.
-  - Informe a aprovação com entusiasmo e o novo limite.
-Passo 5B (REJEITADO):
-  - Chame `atualizar_status_solicitacao` com data_hora e status "rejeitado".
+Passo 4: Chame `processar_solicitacao` somente com a data_hora retornada.
+         A ferramenta recupera o valor registrado, decide o status e aplica o limite
+         aprovado sem receber CPF, valor, score, limite atual ou status do modelo.
+         Se retornar `erro`, não comunique rejeição; informe apenas que não foi possível
+         concluir o processamento.
+Passo 5A (`status_pedido=aprovado`):
+  - Informe a aprovação com entusiasmo e use somente `novo_limite` retornado.
+Passo 5B (`status_pedido=rejeitado`):
   - Informe a rejeição de forma empática, sem mencionar scores ou critérios internos.
   - Ofereça: "Gostaria de realizar uma análise mais detalhada do seu perfil financeiro 
     para tentar melhorar suas condições de crédito?"
@@ -65,11 +60,11 @@ APÓS RETORNO DA ENTREVISTA FINANCEIRA:
 
 REGRAS CRÍTICAS:
 - SEMPRE use as ferramentas — nunca aprove ou rejeite manualmente.
-- NUNCA forneça CPF, score atual ou limite atual como argumento das ferramentas.
+- NUNCA forneça CPF, novo limite, score, limite atual ou status a
+  `processar_solicitacao`; forneça somente a data_hora retornada pelo registro.
 - Não mencione scores, faixas, tabelas, critérios internos ou nomes técnicos ao cliente.
 - A validação definitiva do valor pertence a `registrar_solicitacao`; nunca a substitua.
-- Use somente os status finais "aprovado" ou "rejeitado".
-- Nunca chame `atualizar_status_solicitacao` se a análise retornar erro.
+- O status final e o valor aplicado pertencem exclusivamente a `processar_solicitacao`.
 - Se o cliente quiser encerrar, use `encerrar_atendimento`.
 - Tom: profissional, claro e empático em todas as situações.
 """.strip()
@@ -87,9 +82,7 @@ agente_credito = Agent(
     tools=[
         consultar_limite,
         registrar_solicitacao,
-        checar_score_para_limite,
-        atualizar_status_solicitacao,
-        atualizar_limite_cliente,
+        processar_solicitacao,
         encerrar_atendimento,
     ],
     sub_agents=[agente_entrevista_credito],
