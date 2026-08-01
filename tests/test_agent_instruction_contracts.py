@@ -1,6 +1,7 @@
 import unittest
 
-from agents.cambio import agente_cambio
+from agents._model import MODELO_ATIVO
+from agents.cambio import SYSTEM_PROMPT_CAMBIO, agente_cambio
 from agents.credito import SYSTEM_PROMPT_CREDITO, agente_credito
 from agents.entrevista_credito import (
     SYSTEM_PROMPT_ENTREVISTA,
@@ -78,6 +79,7 @@ class AgentInstructionContractTests(unittest.TestCase):
             "triagem": self._prompt_normalizado(SYSTEM_PROMPT_TRIAGEM),
             "credito": self._prompt_normalizado(SYSTEM_PROMPT_CREDITO),
             "entrevista": self._prompt_normalizado(SYSTEM_PROMPT_ENTREVISTA),
+            "cambio": self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO),
         }
 
         for nome, prompt in prompts.items():
@@ -99,6 +101,7 @@ class AgentInstructionContractTests(unittest.TestCase):
             "triagem": SYSTEM_PROMPT_TRIAGEM,
             "credito": SYSTEM_PROMPT_CREDITO,
             "entrevista": SYSTEM_PROMPT_ENTREVISTA,
+            "cambio": SYSTEM_PROMPT_CAMBIO,
         }.items():
             normalizado = self._prompt_normalizado(prompt)
             with self.subTest(nome=nome):
@@ -132,6 +135,7 @@ class AgentInstructionContractTests(unittest.TestCase):
             "triagem": SYSTEM_PROMPT_TRIAGEM,
             "credito": SYSTEM_PROMPT_CREDITO,
             "entrevista": SYSTEM_PROMPT_ENTREVISTA,
+            "cambio": SYSTEM_PROMPT_CAMBIO,
         }.items():
             normalizado = self._prompt_normalizado(prompt)
             with self.subTest(nome=nome):
@@ -143,6 +147,7 @@ class AgentInstructionContractTests(unittest.TestCase):
             self._prompt_normalizado(SYSTEM_PROMPT_TRIAGEM),
             self._prompt_normalizado(SYSTEM_PROMPT_CREDITO),
             self._prompt_normalizado(SYSTEM_PROMPT_ENTREVISTA),
+            self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO),
         ]
 
         for prompt in prompts:
@@ -218,12 +223,87 @@ class AgentInstructionContractTests(unittest.TestCase):
             "triagem": SYSTEM_PROMPT_TRIAGEM,
             "credito": SYSTEM_PROMPT_CREDITO,
             "entrevista": SYSTEM_PROMPT_ENTREVISTA,
+            "cambio": SYSTEM_PROMPT_CAMBIO,
         }.items():
             normalizado = self._prompt_normalizado(prompt)
             with self.subTest(nome=nome):
                 self.assertNotIn("use `encerrar_atendimento`", normalizado)
                 self.assertIn("encerramento explícito", normalizado)
                 self.assertIn("sistema", normalizado)
+
+    def test_20_cambio_preserva_identidade_modelo_tools_e_topologia(self):
+        self.assertEqual("agente_cambio", agente_cambio.name)
+        self.assertEqual(MODELO_ATIVO, agente_cambio.model)
+        self.assertEqual([], agente_cambio.sub_agents)
+        self.assertEqual(
+            ["buscar_cotacao", "encerrar_atendimento"],
+            [tool.__name__ for tool in agente_cambio.tools],
+        )
+
+    def test_21_cambio_exige_tool_e_proibe_cotacao_propria(self):
+        prompt = self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO)
+        self.assertIn("para toda solicitação de cotação", prompt)
+        self.assertIn("usar `buscar_cotacao`", prompt)
+        self.assertIn("nunca invente ou estime cotação", prompt)
+        self.assertIn("conhecimento próprio", prompt)
+
+    def test_22_cambio_nao_altera_nem_formata_dados_finais(self):
+        prompt = self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO)
+        self.assertIn("não altere, arredonde, reformate, omita ou complemente", prompt)
+        self.assertIn("qualquer valor retornado", prompt)
+        self.assertIn("não formate nem reescreva", prompt)
+        self.assertIn("apresentação financeira final", prompt)
+        self.assertIn("pertence ao sistema", prompt)
+
+    def test_23_cambio_nao_cria_fallback_numerico_ou_esconde_falha(self):
+        prompt = self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO)
+        self.assertIn("não esconda nem substitua o erro", prompt)
+        self.assertIn("nunca produza estimativa ou fallback numérico", prompt)
+        self.assertIn("não repita automaticamente", prompt)
+
+    def test_24_cambio_nao_infere_ou_converte_temporalidade(self):
+        prompt = self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO)
+        self.assertIn("não converta datas, horários ou timestamps", prompt)
+        self.assertIn("nunca infira timezone, fuso ou offset", prompt)
+
+    def test_25_cambio_desambigua_sem_escolher_moeda_arbitrariamente(self):
+        prompt = self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO)
+        self.assertIn("correspondência inequívoca", prompt)
+        self.assertIn("moeda estiver ausente ou ambígua", prompt)
+        self.assertIn("pedir esclarecimento", prompt)
+        self.assertIn("nunca escolher uma moeda arbitrariamente", prompt)
+        self.assertIn("não invente código nem prometa suporte", prompt)
+
+    def test_26_cambio_nao_converte_ou_interpreta_financeiramente(self):
+        prompt = self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO)
+        self.assertIn("não converta valores para outra moeda", prompt)
+        self.assertIn("destino da consulta atual é brl", prompt)
+        self.assertIn("não calcule spread, média, percentual adicional", prompt)
+        self.assertIn("não interprete compra ou venda", prompt)
+        self.assertIn("aconselhar o cliente", prompt)
+
+    def test_27_cambio_nao_vaza_arquitetura_nem_acessa_outros_dominios(self):
+        prompt = self._prompt_normalizado(SYSTEM_PROMPT_CAMBIO)
+        proibidos = {
+            "functionresponse",
+            "renderer",
+            "orquestrador",
+            "provider",
+            "schema",
+            "json",
+            "http",
+            "url",
+            "api",
+            "cpf do cliente",
+            "calcule score",
+            "aumente limite",
+        }
+        self.assertTrue(proibidos.isdisjoint({
+            termo for termo in proibidos if termo in prompt
+        }))
+        self.assertIn("não solicite nem tente obter cpf", prompt)
+        self.assertIn("nunca anuncie transferência", prompt)
+        self.assertIn("handoff", prompt)
 
 
 if __name__ == "__main__":

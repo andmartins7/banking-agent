@@ -1,100 +1,228 @@
-"""
-Ferramentas de câmbio do Banco Ágil.
+"""Tool pública de câmbio do Banco Ágil."""
 
-Funções expostas como tools do Google ADK:
-    - buscar_cotacao
-"""
-
-import httpx
 from datetime import datetime
-from config import CAMBIO_API_BASE_URL, MOEDAS_SUPORTADAS
+from decimal import Decimal, InvalidOperation
+
+from google.adk.tools import ToolContext
+
+from config import MOEDAS_SUPORTADAS
+from session_state import ErroAutorizacaoSessao, obter_cpf_autorizado
+from tools.cambio_provider import (
+    AwesomeApiProvider,
+    CategoriaErroCambio,
+    CotacaoCambio,
+    ErroCambioProvider,
+)
 
 
-def buscar_cotacao(codigo_moeda: str) -> dict:
-    """
-    Busca a cotação atual de uma moeda estrangeira em relação ao Real (BRL).
+_MENSAGENS_ERRO_PROVIDER = {
+    CategoriaErroCambio.TIMEOUT: (
+        "Não foi possível consultar a cotação no momento. "
+        "Tente novamente em instantes."
+    ),
+    CategoriaErroCambio.TRANSPORTE: (
+        "O serviço de cotação está temporariamente indisponível. "
+        "Tente novamente em instantes."
+    ),
+    CategoriaErroCambio.HTTP: (
+        "O serviço de cotação está temporariamente indisponível. "
+        "Tente novamente em instantes."
+    ),
+    CategoriaErroCambio.RESPOSTA_INVALIDA: (
+        "A fonte externa não forneceu uma cotação válida no momento."
+    ),
+}
 
-    Utiliza a AwesomeAPI (https://economia.awesomeapi.com.br) — gratuita, sem autenticação.
+_CATEGORIAS_ERRO_PUBLICAS = {
+    "autorizacao",
+    "entrada_invalida",
+    "timeout",
+    "transporte",
+    "http",
+    "resposta_invalida",
+}
+_MENSAGEM_APRESENTACAO_INDISPONIVEL = (
+    "Não foi possível apresentar a cotação com segurança. "
+    "Tente novamente em instantes."
+)
+_FORMATO_DATA_FONTE = "%Y-%m-%d %H:%M:%S"
 
-    Args:
-        codigo_moeda: Código ISO da moeda (ex: 'USD', 'EUR', 'GBP').
-                      Case-insensitive; normalizado internamente para maiúsculas.
 
-    Returns:
-        dict com:
-            sucesso (bool): True se cotação obtida com sucesso.
-            moeda_codigo (str): código normalizado (ex: 'USD').
-            moeda_nome (str): nome completo do par (ex: 'Dólar Americano/Real Brasileiro').
-            cotacao_compra (float): valor bid (banco compra).
-            cotacao_venda (float): valor ask (banco vende).
-            variacao_pct (float): variação percentual no dia.
-            data_atualizacao (str): data/hora formatada 'DD/MM/AAAA às HH:MM'.
-            erro (str | None): mensagem de erro se sucesso=False.
-    """
-    _vazio = {
+def _resultado_falha(categoria: str, mensagem: str) -> dict[str, object]:
+    """Cria falha pública sem valores financeiros artificiais."""
+    return {
         "sucesso": False,
-        "moeda_codigo": "",
-        "moeda_nome": "",
-        "cotacao_compra": 0.0,
-        "cotacao_venda": 0.0,
-        "variacao_pct": 0.0,
-        "data_atualizacao": "",
+        "categoria_erro": categoria,
+        "erro": mensagem,
     }
 
+
+def _serializar_cotacao(cotacao: CotacaoCambio) -> dict[str, object]:
+    """Converte uma cotação validada para tipos JSON-safe explícitos."""
+    return {
+        "sucesso": True,
+        "moeda_origem": cotacao.moeda_origem,
+        "moeda_destino": cotacao.moeda_destino,
+        "nome": cotacao.nome,
+        "cotacao_compra": format(cotacao.cotacao_compra, "f"),
+        "cotacao_venda": format(cotacao.cotacao_venda, "f"),
+        "variacao_pct": format(cotacao.variacao_pct, "f"),
+        "timestamp_fonte": cotacao.timestamp_fonte,
+        "data_atualizacao_fonte": cotacao.data_atualizacao_fonte.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "provider": cotacao.provider,
+        "categoria_erro": None,
+        "erro": None,
+    }
+
+
+def _decimal_publico_valido(valor: object, *, positivo: bool) -> bool:
+    """Valida uma string decimal sem alterar sua representação pública."""
+    if not isinstance(valor, str) or not valor:
+        return False
     try:
-        # 1. Normalizar código
-        codigo = codigo_moeda.strip().upper()
+        numero = Decimal(valor)
+    except InvalidOperation:
+        return False
+    if not numero.is_finite():
+        return False
+    return not positivo or numero > 0
 
-        # 2. Verificar suporte
-        if codigo not in MOEDAS_SUPORTADAS:
-            opcoes = ", ".join(sorted(MOEDAS_SUPORTADAS.keys()))
-            return {**_vazio, "erro": f"Moeda '{codigo}' não suportada. Disponíveis: {opcoes}"}
 
-        # 3. Montar URL e fazer requisição
-        url = f"{CAMBIO_API_BASE_URL}/{codigo}-BRL"
-        response = httpx.get(url, timeout=5.0)
-        response.raise_for_status()
+def _data_fonte_valida(valor: object) -> bool:
+    """Confirma o formato público sem atribuir timezone à data da fonte."""
+    if not isinstance(valor, str):
+        return False
+    try:
+        data = datetime.strptime(valor, _FORMATO_DATA_FONTE)
+    except ValueError:
+        return False
+    return data.strftime(_FORMATO_DATA_FONTE) == valor
 
-        # 4. Parsear JSON
-        dados = response.json()
-        chave = f"{codigo}BRL"
-        if chave not in dados:
-            return {**_vazio, "erro": "Resposta inesperada da API de câmbio."}
 
-        info = dados[chave]
+def renderizar_resultado_cotacao(resultado: object) -> str:
+    """Renderiza deterministicamente o contrato público de câmbio."""
+    if not isinstance(resultado, dict):
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
 
-        # 5. Formatar data
-        data_atualizacao = ""
-        try:
-            dt = datetime.strptime(info["create_date"], "%Y-%m-%d %H:%M:%S")
-            data_atualizacao = dt.strftime("%d/%m/%Y às %H:%M")
-        except (KeyError, ValueError):
-            data_atualizacao = "indisponível"
+    if resultado.get("sucesso") is False:
+        categoria = resultado.get("categoria_erro")
+        erro = resultado.get("erro")
+        if (
+            categoria not in _CATEGORIAS_ERRO_PUBLICAS
+            or not isinstance(erro, str)
+            or not erro.strip()
+        ):
+            return _MENSAGEM_APRESENTACAO_INDISPONIVEL
+        return f"Falha na consulta de câmbio ({categoria}): {erro.strip()}"
 
-        # 6. Extrair e converter campos
-        cotacao_compra = float(info.get("bid", 0))
-        cotacao_venda  = float(info.get("ask", 0))
-        variacao_pct   = float(info.get("pctChange", 0))
-        moeda_nome     = info.get("name", codigo)
+    if resultado.get("sucesso") is not True:
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
+    if resultado.get("categoria_erro") is not None or resultado.get("erro") is not None:
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
 
-        return {
-            "sucesso": True,
-            "moeda_codigo": codigo,
-            "moeda_nome": moeda_nome,
-            "cotacao_compra": cotacao_compra,
-            "cotacao_venda": cotacao_venda,
-            "variacao_pct": variacao_pct,
-            "data_atualizacao": data_atualizacao,
-            "erro": None,
-        }
+    campos_texto = (
+        "moeda_origem",
+        "moeda_destino",
+        "nome",
+        "provider",
+    )
+    if any(
+        not isinstance(resultado.get(campo), str)
+        or not resultado[campo].strip()
+        for campo in campos_texto
+    ):
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
+    if resultado["moeda_destino"] != "BRL":
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
 
-    except httpx.TimeoutException:
-        return {**_vazio, "erro": "API de câmbio indisponível (timeout). Tente novamente em instantes."}
-    except httpx.HTTPStatusError as e:
-        return {**_vazio, "erro": f"Erro ao consultar API de câmbio (HTTP {e.response.status_code})."}
-    except (KeyError, ValueError) as e:
-        print(f"[TOOL ERROR] buscar_cotacao parse: {type(e).__name__}: {e}")
-        return {**_vazio, "erro": "Erro ao processar resposta da API de câmbio."}
-    except Exception as e:
-        print(f"[TOOL ERROR] buscar_cotacao: {type(e).__name__}: {e}")
-        return {**_vazio, "erro": "Erro inesperado ao consultar câmbio. Tente novamente."}
+    compra = resultado.get("cotacao_compra")
+    venda = resultado.get("cotacao_venda")
+    variacao = resultado.get("variacao_pct")
+    if not _decimal_publico_valido(compra, positivo=True):
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
+    if not _decimal_publico_valido(venda, positivo=True):
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
+    if not _decimal_publico_valido(variacao, positivo=False):
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
+
+    timestamp = resultado.get("timestamp_fonte")
+    data_fonte = resultado.get("data_atualizacao_fonte")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
+    if not _data_fonte_valida(data_fonte):
+        return _MENSAGEM_APRESENTACAO_INDISPONIVEL
+
+    origem = resultado["moeda_origem"].strip()
+    destino = resultado["moeda_destino"].strip()
+    nome = resultado["nome"].strip()
+    provider = resultado["provider"].strip()
+    return "\n".join((
+        f"Cotação validada — {origem}/{destino}",
+        f"Moeda: {nome}",
+        f"Compra: {compra} {destino}",
+        f"Venda: {venda} {destino}",
+        f"Variação: {variacao}%",
+        f"Fonte: {provider}",
+        f"Data/hora informada pela fonte: {data_fonte}",
+        "Fuso horário da data textual: não informado pela fonte.",
+        f"Timestamp Unix informado pela fonte: {timestamp}",
+    ))
+
+
+def buscar_cotacao_autorizada(
+    codigo_moeda: str,
+    provider: AwesomeApiProvider,
+) -> dict[str, object]:
+    """Normaliza a moeda e delega exclusivamente ao provider validado."""
+    if not isinstance(codigo_moeda, str):
+        return _resultado_falha(
+            "entrada_invalida",
+            "O código da moeda é inválido.",
+        )
+
+    codigo = codigo_moeda.strip().upper()
+    if codigo not in MOEDAS_SUPORTADAS:
+        opcoes = ", ".join(sorted(MOEDAS_SUPORTADAS))
+        return _resultado_falha(
+            "entrada_invalida",
+            f"Moeda não suportada. Disponíveis: {opcoes}.",
+        )
+
+    try:
+        cotacao = provider.consultar(codigo)
+    except ErroCambioProvider as erro:
+        return _resultado_falha(
+            erro.categoria.value,
+            _MENSAGENS_ERRO_PROVIDER[erro.categoria],
+        )
+
+    return _serializar_cotacao(cotacao)
+
+
+def buscar_cotacao(
+    codigo_moeda: str,
+    tool_context: ToolContext,
+) -> dict[str, object]:
+    """
+    Consulta uma cotação validada para uma sessão autenticada e ativa.
+
+    Args:
+        codigo_moeda: Código da moeda de origem, como USD, EUR ou GBP.
+
+    Returns:
+        Dicionário JSON-safe com a cotação validada ou uma falha controlada.
+    """
+    try:
+        obter_cpf_autorizado(tool_context)
+    except ErroAutorizacaoSessao:
+        return _resultado_falha(
+            "autorizacao",
+            "A consulta de câmbio requer uma sessão autenticada e ativa.",
+        )
+
+    return buscar_cotacao_autorizada(
+        codigo_moeda,
+        AwesomeApiProvider(),
+    )
