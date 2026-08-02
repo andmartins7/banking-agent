@@ -1,252 +1,251 @@
 # 🏦 Banco Ágil — Agente Bancário Inteligente
 
-Sistema de atendimento ao cliente bancário baseado em múltiplos agentes de IA especializados, construído com Google ADK (Agent Developer Kit) e Gemini 2.0 Flash.
-
----
+O Banco Ágil é um atendimento bancário conversacional construído com Python,
+Google ADK e Streamlit. A interface apresenta um único assistente ao cliente,
+enquanto quatro capacidades internas cooperam para autenticação, crédito,
+entrevista financeira e câmbio.
 
 ## Visão Geral
 
-O Banco Ágil simula um canal de atendimento digital onde o cliente interage com uma interface de chat unificada (Streamlit). Por trás dos panos, um sistema de **4 agentes especializados** colabora de forma transparente — o cliente nunca percebe as transições entre eles.
+A solução reúne quatro capacidades:
 
-**Serviços disponíveis:**
-- Autenticação segura por CPF e data de nascimento
-- Consulta e solicitação de aumento de limite de crédito
-- Análise financeira e recálculo de score de crédito
-- Cotação de moedas estrangeiras em tempo real
+- **Triagem:** autentica o cliente e direciona sua intenção;
+- **Crédito:** consulta limite e processa pedidos de aumento;
+- **Entrevista de Crédito:** coleta o perfil financeiro e recalcula o score;
+- **Câmbio:** consulta cotações permitidas em reais.
 
----
+A UI é um chat Streamlit. O modelo auxilia apenas a conversa, a identificação de
+intenção e o uso das ferramentas. Autenticação, autorização, tentativas, regras
+financeiras, persistência e encerramento são controlados por código
+determinístico.
 
 ## Arquitetura do Sistema
 
-### Hierarquia de Agentes
-
-```
-Runner (ADK)
-└── Agente de Triagem  [RAIZ — porta de entrada obrigatória]
-    ├── tools: autenticar_cliente, encerrar_atendimento
-    └── sub_agents:
-        ├── Agente de Crédito
-        │   ├── tools: consultar_limite, registrar_solicitacao,
-        │   │          checar_score_para_limite, atualizar_status_solicitacao,
-        │   │          atualizar_limite_cliente, encerrar_atendimento
-        │   └── sub_agents:
-        │       └── Agente de Entrevista de Crédito
-        │           └── tools: calcular_score, atualizar_score_cliente,
-        │                      encerrar_atendimento
-        └── Agente de Câmbio
-            └── tools: buscar_cotacao, encerrar_atendimento
+```text
+UI Streamlit (`app.py`)
+    → orquestrador e Runner ADK (`orchestrator.py`)
+        → capacidades internas (`agents/`)
+            → ferramentas determinísticas (`tools/`)
+                → estado da sessão
+                → CSVs locais / provider externo de câmbio
 ```
 
-### Responsabilidades por Agente
+O estado da sessão é a autoridade para identidade autenticada, tentativas,
+autorização, andamento da entrevista e encerramento. As transições entre
+capacidades são internas: por contrato, elas não são anunciadas ao cliente, e a
+UI mantém a experiência de um único atendente.
 
-| Agente | Arquivo | Responsabilidade |
-|--------|---------|-----------------|
-| **Triagem** | `agents/triagem.py` | Autentica (CPF + nasc.), máx. 3 tentativas, roteia para especialistas |
-| **Crédito** | `agents/credito.py` | Consulta limite, processa aumento, checa score vs tabela |
-| **Entrevista de Crédito** | `agents/entrevista_credito.py` | 5 perguntas financeiras, recalcula score, atualiza CSV |
-| **Câmbio** | `agents/cambio.py` | Cotação em tempo real via AwesomeAPI (USD, EUR, GBP, etc.) |
+### Capacidades e ferramentas
 
-### Fluxo de Atendimento
-
-```
-Cliente abre o app
-        │
-        ▼
-[Triagem] — Autentica (CPF + data de nascimento)
-        │
-        ├── "crédito / limite / aumento"
-        │         ▼
-        │   [Crédito] — Consulta → Solicitação → Checa score
-        │         │
-        │         ├── Aprovado → Atualiza limite → Confirma
-        │         └── Rejeitado → Oferece entrevista
-        │                   ▼ (aceita)
-        │             [Entrevista] — 5 perguntas → Novo score → Retorna
-        │
-        └── "câmbio / dólar / cotação"
-                  ▼
-            [Câmbio] — Busca API → Exibe cotação → Oferece nova consulta
+```text
+Triagem
+├── autenticar_cliente
+├── encerrar_atendimento
+├── Crédito
+│   ├── consultar_limite
+│   ├── registrar_solicitacao
+│   ├── processar_solicitacao
+│   ├── encerrar_atendimento
+│   └── Entrevista de Crédito
+│       ├── processar_entrevista_credito
+│       └── encerrar_atendimento
+└── Câmbio
+    ├── buscar_cotacao
+    └── encerrar_atendimento
 ```
 
-### Persistência de Dados (CSV)
+- **Triagem:** valida CPF e data de nascimento, limita a autenticação a três
+  tentativas e encerra o atendimento após a terceira falha. Depois da
+  autenticação, direciona implicitamente a intenção para Crédito ou Câmbio.
+- **Crédito:** consulta o limite, registra o pedido e aplica a política de
+  `score_limite.csv`. O resultado final é `aprovado` ou `rejeitado`.
+- **Entrevista de Crédito:** coleta renda mensal, tipo de emprego, despesas
+  fixas, número de dependentes e existência de dívidas; recalcula o score,
+  atualiza `clientes.csv` e reanalisa o mesmo pedido rejeitado.
+- **Câmbio:** consulta a AwesomeAPI para USD, EUR, GBP, JPY, BTC, CAD, AUD, CHF
+  e ARS. Valor e temporalidade vêm da resposta validada do provider; falhas e
+  indisponibilidade não geram cotação fictícia.
 
-| Arquivo | Uso |
-|---------|-----|
-| `data/clientes.csv` | Base de clientes: CPF, nome, data nascimento, score, limite |
-| `data/score_limite.csv` | Tabela de faixas: limite máximo × score mínimo exigido |
-| `data/solicitacoes_aumento_limite.csv` | Histórico de pedidos com status (pendente/aprovado/rejeitado) |
+### Modelo e decisões
 
-### Fórmula de Score de Crédito
+O modelo configurado é `gemini-3.1-flash-lite`, com
+`gemini-3.5-flash` como fallback. O modelo não autentica, calcula score, decide
+crédito, grava dados nem produz valores de câmbio por conta própria; essas
+responsabilidades pertencem às ferramentas e ao orquestrador.
+
+### Persistência em CSV
+
+| Arquivo | Finalidade |
+|---|---|
+| `data/clientes.csv` | Identidade, nascimento, score e limite dos clientes |
+| `data/score_limite.csv` | Faixas de limite e score mínimo da política de crédito |
+| `data/solicitacoes_aumento_limite.csv` | Histórico dos pedidos de aumento |
+
+Cada solicitação contém exatamente os campos
+`cpf_cliente`, `data_hora_solicitacao`, `limite_atual`,
+`novo_limite_solicitado` e `status_pedido`. O pedido nasce como `pendente`; os
+status finais canônicos são `aprovado` e `rejeitado`.
+
+### Fórmula do score
 
 ```python
-score = (
-    (renda_mensal / (despesas_fixas + 1)) * 30      # peso_renda
+score_bruto = (
+    (renda_mensal / (despesas_fixas + 1)) * 30
     + {"formal": 300, "autonomo": 200, "desempregado": 0}[tipo_emprego]
-    + {0: 100, 1: 80, 2: 60, 3: 30}[min(dependentes, 3)]
+    + {0: 100, 1: 80, 2: 60, 3: 30}[min(num_dependentes, 3)]
     + {"nao": 100, "sim": -100}[tem_dividas]
 )
-score_final = max(0, min(1000, round(score)))
+score_final = max(0, min(1000, round(score_bruto)))
 ```
 
----
+O resultado considera renda em relação às despesas, situação de emprego,
+dependentes e dívidas, e sempre fica na faixa de 0 a 1000.
 
 ## Funcionalidades Implementadas
 
-- [x] Autenticação com CPF e data de nascimento (normalização de formatos)
-- [x] Controle de tentativas de autenticação (máx. 3, encerra na 3ª falha)
-- [x] Consulta de limite de crédito atual
-- [x] Solicitação de aumento de limite com validação (novo > atual)
-- [x] Registro persistente em CSV com status pendente/aprovado/rejeitado
-- [x] Aprovação automática baseada em score vs tabela de faixas
-- [x] Entrevista financeira com 5 perguntas sequenciais
-- [x] Cálculo de score ponderado com clamp [0, 1000]
-- [x] Atualização de score e limite em `clientes.csv`
-- [x] Retorno ao Agente de Crédito após entrevista para nova análise
-- [x] Cotação de moedas em tempo real (USD, EUR, GBP, JPY, BTC, CAD, AUD, CHF, ARS)
-- [x] Handoff entre agentes invisível ao cliente
-- [x] Encerramento por solicitação do cliente a qualquer momento
-- [x] Tratamento de erros: API indisponível, CSV ausente, entrada inválida
-- [x] Interface Streamlit com chat, spinner, histórico e desabilitação pós-encerramento
+- autenticação por CPF e data de nascimento, com normalização de formatos;
+- rejeição segura de CPF duplicado e limite global de três falhas;
+- consulta e aumento de limite com política determinística;
+- persistência do pedido e atualização atômica dos dados financeiros;
+- entrevista sequencial com cinco respostas e reanálise do pedido associado;
+- cotação validada de moedas permitidas, com timeout explícito;
+- histórico de chat e estado da sessão isolados por atendimento;
+- encerramento global com precedência sobre os demais fluxos.
 
----
+O encerramento grava `conversation_ended` no estado. A partir daí, o
+orquestrador não processa nova operação e a UI deixa de receber novos turnos
+naquele atendimento. A autoridade é o estado da sessão, não uma heurística
+textual da resposta.
 
-## Escolhas Técnicas
+Erros esperados são convertidos em respostas controladas: credencial inválida,
+três falhas de autenticação, CSV ausente ou malformado, entrada financeira
+inválida, falha de persistência, moeda não permitida, timeout, erro de transporte
+e resposta inválida da API. Chaves e detalhes internos não são exibidos ao
+cliente.
 
-| Decisão | Justificativa |
-|---------|--------------|
-| **Google ADK** | Suporte nativo a multi-agente com `sub_agents`, handoff implícito, function calling e Gemini integrado |
-| **Gemini 2.0 Flash** | Free tier generoso, baixa latência, excelente para function calling |
-| **AwesomeAPI** | Gratuita, sem autenticação, JSON simples, suporta BRL |
-| **Pandas** | Leitura/escrita CSV robusta, tipagem controlada com `dtype=str` |
-| **InMemorySessionService** | Suficiente para MVP single-user; documentado como limitação para escala |
-| **httpx** | Cliente HTTP moderno com timeout configurável e tratamento de erros limpo |
+## Desafios e Soluções
 
-### Desafios e Soluções
+- **Regras financeiras fora do LLM:** score, política de crédito e persistência
+  ficam em funções determinísticas e testáveis.
+- **Estado ADK confiável:** identidade, autorização e andamento do fluxo ficam
+  no estado da sessão, separados do texto do histórico.
+- **Pedido correto após entrevista:** a entrevista exige associação única ao
+  pedido rejeitado e reanalisa essa mesma solicitação.
+- **Provider externo isolado:** o acesso à AwesomeAPI tem allowlist, timeout,
+  parsing estrito e renderer determinístico.
+- **Validação vertical reproduzível:** os testes substituem LLM e rede por
+  doubles controlados e exercitam o app Streamlit de ponta a ponta.
 
-**pandas 2.x — `applymap` removido:** Substituído por `.map()` em todas as ferramentas de CSV.
+## Escolhas Técnicas e Justificativas
 
-**ADK 1.3.0 — API assíncrona:** `InMemorySessionService` é 100% async. O `Runner.run()` é síncrono (gerador), mas `create_session` e `get_session` requerem `asyncio.run()`. O orquestrador encapsula isso em `_run_async()`.
+| Tecnologia/decisão | Justificativa |
+|---|---|
+| Python | Base única para agentes, regras, dados e testes |
+| Streamlit | UI de chat pequena e reproduzível para o MVP |
+| Google ADK | Orquestração de agentes, sessões e chamadas de ferramentas |
+| Estado determinístico | Mantém autenticação e decisões críticas fora do modelo |
+| CSVs | Persistência simples exigida pelo desafio |
+| Provider de câmbio isolado | Evita acoplar regra de negócio ao transporte HTTP |
+| `unittest` e Streamlit `AppTest` | Cobrem unidades, integração e fluxos verticais sem serviços reais |
 
-**Handoff invisível:** O ADK gerencia `transfer_to_agent` internamente quando o agente pai decide delegar para um `sub_agent`. O sistema prompt de cada agente instrui a não mencionar termos técnicos.
-
-**Estado de encerramento:** `encerrar_atendimento()` retorna `{"encerrado": True}`, mas o ADK não atualiza `session.state` automaticamente a partir do retorno de uma tool. O Streamlit detecta o encerramento pelo padrão de resposta do agente (heurística de conteúdo), mantendo robustez sem depender de estado interno do ADK.
-
----
-
-## Tutorial de Execução
+## Tutorial de Execução e Testes
 
 ### Pré-requisitos
 
-- Python 3.11+
-- Chave da API do Google Gemini (gratuita): https://aistudio.google.com/app/apikey
+- Python 3.11 ou superior;
+- chave da API Google Gemini para executar a aplicação real.
 
-### 1. Clonar o repositório
+### 1. Clonar e instalar
 
 ```bash
-git clone https://github.com/seu-usuario/banking-agent.git
+git clone https://github.com/andmartins7/banking-agent.git
 cd banking-agent
-```
-
-### 2. Instalar dependências
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configurar variáveis de ambiente
+### 2. Configurar o ambiente
 
-```bash
-# Linux/macOS
-cp .env.example .env
+Copie `.env.example` para `.env` e preencha somente a variável obrigatória:
 
-# Windows
-copy .env.example .env
-```
-
-Edite o arquivo `.env` e insira sua chave:
 ```env
 GOOGLE_API_KEY=sua_chave_aqui
 ```
 
-### 4. Inicializar dados
+No Linux/macOS, use `cp .env.example .env`; no Windows, use
+`copy .env.example .env`. Nunca versione o `.env` ou uma chave real.
+
+### 3. Inicializar os dados
 
 ```bash
 python data/seed.py
 ```
 
-Isso cria os arquivos CSV com dados de teste em `data/`.
+Sem argumentos, o seed cria apenas os CSVs ausentes e preserva os existentes.
+Para recriar todos os arquivos:
 
-### 5. Executar a aplicação
+```bash
+python data/seed.py --force
+```
+
+`--force` sobrescreve os CSVs e deve ser usado somente quando a perda dos dados
+locais atuais for intencional.
+
+### 4. Executar a UI
 
 ```bash
 python -m streamlit run app.py
 ```
 
-> **Nota Windows:** Use sempre `python -m streamlit run app.py` em vez de `streamlit run app.py` diretamente, para garantir que o executável correto do Python seja usado.
+A aplicação fica disponível em `http://localhost:8501`. No Windows,
+`.\run.ps1` é um atalho opcional para o mesmo fluxo.
 
-Acesse em: **http://localhost:8501**
+### 5. Executar os testes
 
-Ou use o script de atalho:
-```powershell
-.\run.ps1
+```bash
+python -B -m unittest discover -s tests
 ```
 
----
+No checkpoint funcional desta entrega, a suíte registrou **417/417 testes
+aprovados**, sem falhas, erros ou testes ignorados. Essa contagem descreve o
+checkpoint atual e deve ser atualizada se a suíte mudar. A cobertura inclui
+testes unitários, integração/orquestração e E2E verticais com Streamlit
+`AppTest`, sem LLM ou rede real.
 
-## Dados de Teste
+### Evidências verticais
 
-Use os seguintes dados para testar a autenticação:
+Os cenários verticais comprovam autenticação válida; três falhas sem quarta
+tentativa; consulta de limite; aumento aprovado e rejeitado; entrevista e novo
+score; reanálise do mesmo pedido; Câmbio; timeout; encerramento; e isolamento
+entre sessões.
 
-| Nome | CPF | Data de Nascimento | Score | Limite |
-|------|-----|--------------------|-------|--------|
+### Dados de demonstração
+
+| Nome | CPF | Data de nascimento | Score | Limite |
+|---|---|---|---:|---:|
 | João Silva | 12345678901 | 15/03/1985 | 750 | R$ 5.000 |
 | Maria Oliveira | 98765432100 | 22/07/1990 | 420 | R$ 1.500 |
 | Carlos Mendes | 11122233344 | 08/11/1978 | 600 | R$ 3.000 |
 | Ana Souza | 55566677788 | 30/01/1995 | 850 | R$ 10.000 |
 | Pedro Costa | 99988877766 | 14/06/1982 | 300 | R$ 500 |
 
-### Cenários de Teste Sugeridos
+## Limitações conhecidas
 
-**Cenário 1 — Crédito aprovado:**
-Login com Ana Souza (score 850) → solicitar aumento para R$ 15.000 → aprovado ✓
-
-**Cenário 2 — Crédito rejeitado + entrevista:**
-Login com Maria Oliveira (score 420) → solicitar aumento para R$ 5.000 → rejeitado → aceitar entrevista → novo score calculado
-
-**Cenário 3 — Câmbio:**
-Login com qualquer cliente → "quero saber a cotação do dólar"
-
-**Cenário 4 — Falha de autenticação:**
-Inserir CPF válido com data errada 3 vezes → encerramento automático
-
----
+- as sessões são mantidas em memória;
+- a persistência em CSV é destinada ao desafio/MVP;
+- não há CI automatizada configurada no repositório.
 
 ## Estrutura do Projeto
 
-```
+```text
 banking-agent/
-├── agents/
-│   ├── __init__.py
-│   ├── triagem.py              # Agente raiz (autenticação + roteamento)
-│   ├── credito.py              # Agente de crédito
-│   ├── entrevista_credito.py   # Agente de entrevista financeira
-│   └── cambio.py               # Agente de câmbio
-├── tools/
-│   ├── __init__.py
-│   ├── auth_tools.py           # autenticar_cliente, encerrar_atendimento
-│   ├── credito_tools.py        # 5 ferramentas de crédito
-│   ├── score_tools.py          # calcular_score, atualizar_score_cliente
-│   └── cambio_tools.py         # buscar_cotacao
-├── data/
-│   ├── seed.py                 # Script de inicialização dos CSVs
-│   ├── clientes.csv            # Base de clientes
-│   ├── score_limite.csv        # Tabela de faixas de limite
-│   └── solicitacoes_aumento_limite.csv
-├── specs/                      # Specs do projeto (spec-driven development)
-├── app.py                      # Interface Streamlit
-├── orchestrator.py             # Runner ADK + funções de sessão
-├── config.py                   # Configurações centralizadas
+├── agents/          # Capacidades internas e instruções
+├── tools/           # Regras e integrações determinísticas
+├── data/            # CSVs e seed idempotente
+├── tests/           # Testes unitários, integração e E2E Streamlit
+├── specs/           # Especificações e memória do projeto
+├── app.py            # Interface Streamlit
+├── orchestrator.py   # Sessões, roteamento e Runner ADK
+├── config.py         # Constantes e configuração
 ├── requirements.txt
-├── .env.example
-└── README.md
+└── .env.example
 ```
