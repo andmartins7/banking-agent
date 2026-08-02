@@ -1,5 +1,7 @@
 import unittest
 
+from google.adk.sessions.state import State
+
 from session_state import (
     CONVERSATION_ENDED,
     CREDIT_INTERVIEW_ATTEMPTS,
@@ -15,6 +17,7 @@ from session_state import (
     CREDIT_INTERVIEW_RESPONSES,
     CREDIT_INTERVIEW_RETURN_PENDING,
     CREDIT_INTERVIEW_STATUS,
+    _copiar_estado,
     aceitar_entrevista_credito,
     concluir_processamento_entrevista,
     criar_estado_inicial,
@@ -66,6 +69,33 @@ class CreditInterviewStateTests(unittest.TestCase):
             state[CREDIT_INTERVIEW_ATTEMPTS],
         )
         self.assertFalse(state[CREDIT_INTERVIEW_RETURN_PENDING])
+
+    def test_copia_estado_dict_preserva_conteudo_e_isola_colecoes(self):
+        original = criar_estado_inicial()
+        original[CREDIT_INTERVIEW_RESPONSES]["renda_mensal"] = 5000.0
+
+        copia = _copiar_estado(original)
+
+        self.assertEqual(original, copia)
+        copia[CREDIT_INTERVIEW_RESPONSES]["renda_mensal"] = 7000.0
+        copia[CREDIT_INTERVIEW_ATTEMPTS]["renda_mensal"] = 1
+        self.assertEqual(5000.0, original[CREDIT_INTERVIEW_RESPONSES]["renda_mensal"])
+        self.assertEqual(0, original[CREDIT_INTERVIEW_ATTEMPTS]["renda_mensal"])
+
+    def test_copia_estado_adk_real_preserva_conteudo_e_isola_colecoes(self):
+        original = State(value=criar_estado_inicial(), delta={})
+
+        copia = _copiar_estado(original)
+
+        self.assertEqual(original.to_dict(), copia)
+        copia[CREDIT_INTERVIEW_RESPONSES]["renda_mensal"] = 5000.0
+        copia[CREDIT_INTERVIEW_ATTEMPTS]["renda_mensal"] = 1
+        self.assertEqual({}, original.get(CREDIT_INTERVIEW_RESPONSES))
+        self.assertEqual(0, original.get(CREDIT_INTERVIEW_ATTEMPTS)["renda_mensal"])
+
+    def test_copia_rejeita_objeto_incompativel(self):
+        with self.assertRaisesRegex(TypeError, "não pode ser copiado"):
+            _copiar_estado(object())
 
     def test_oferta(self):
         inicial = criar_estado_inicial()
