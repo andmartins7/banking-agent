@@ -1,6 +1,6 @@
 # Spec 00 — Memória do Projeto
 
-## Status: Atualizado após a Fase 2
+## Status: Fase 3 funcional concluída — modo entrega/MVP
 
 ---
 
@@ -215,35 +215,67 @@ Entregas comprovadas:
 
 ---
 
-## 6. Próximo Passo
+## 6. Fase 3 — Checkpoint Funcional do MVP
 
-Próximo: investigar P0 restante e o estado atual da UI/fluxo completo.
+Estado funcional: **concluído, validado e integrado**.
 
-A condição atual da UI e do fluxo completo ainda deve ser verificada. Esta
-memória não antecipa seu diagnóstico e não inicia essa investigação.
+A Fase 3 fechou o fluxo vertical da UI, consolidou o hardening P0 e validou o
+MVP completo. A auditoria final F3-019 registrou decisão **GO**, sem bloqueio P0
+funcional.
+
+| Item | Estado |
+|---|---|
+| Branch principal | `main` |
+| HEAD funcional | `ba362963dd1152e248f5fe4abb8106b0c4dd1680` |
+| Auditoria F3-019 | GO |
+| Suíte completa | 417/417 aprovados |
+| Falhos | 0 |
+| Erros | 0 |
+| Ignorados | 0 |
+| P0 funcionais | concluídos |
+| Modo do projeto | entrega/MVP |
+
+Evidências funcionais consolidadas:
+
+- autenticação vertical e encerramento determinístico após três falhas;
+- consulta e aumento de limite, nos caminhos aprovado e rejeitado;
+- entrevista financeira, recálculo de score e reanálise do mesmo pedido;
+- Câmbio com sucesso e indisponibilidade controlada;
+- encerramento global e isolamento entre sessões;
+- testes verticais de Streamlit sem LLM ou rede real;
+- integridade dos CSVs reais preservada.
+
+No fechamento da F3-019, a atualização do README era a última pendência
+documental P0. A F3-020 finaliza essa documentação sem alterar o checkpoint
+funcional acima.
 
 ---
 
-## 7. Débitos Preservados
+## 7. Próximo Passo
 
-Permanecem pendentes após a Fase 2:
+Próximo: concluir a submissão do MVP usando a documentação final e o checkpoint
+funcional aprovado. Itens P1 e P2 permanecem congelados até a submissão; não há
+nova fase funcional autorizada neste marco.
+
+---
+
+## 8. Débitos Preservados
+
+Permanecem como limitações conhecidas do MVP:
 
 - CI remota;
 - concorrência e locks para operações persistentes;
 - persistência de sessão apenas em memória;
 - warning transitivo sobre `google-cloud-storage < 3.0.0`;
-- segurança e observabilidade não cobertas pelas fases concluídas;
 - quality gates adicionais ainda não configurados;
-- estado atual da UI, do fluxo completo e do README a verificar, sem falha
-  previamente presumida;
-- Docker, deploy e métricas como itens P2.
+- Docker, deploy, métricas e observabilidade como itens P2 congelados.
 
 Handoffs invisíveis e encerramento global não aparecem mais como débitos porque
 foram concluídos e validados na Fase 1.
 
 ---
 
-## 8. Regras de Atualização desta Memória
+## 9. Regras de Atualização desta Memória
 
 Ao concluir uma fase:
 
