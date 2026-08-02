@@ -1,5 +1,7 @@
 """Contrato compartilhado do estado determinístico de uma sessão."""
 
+from collections.abc import Mapping
+
 AUTHENTICATED = "authenticated"
 AUTHENTICATED_CPF = "authenticated_cpf"
 AUTH_ATTEMPTS = "auth_attempts"
@@ -54,14 +56,25 @@ def criar_estado_inicial() -> dict[str, object]:
     }
 
 
-def _copiar_estado(state: dict[str, object]) -> dict[str, object]:
+def _copiar_estado(state: object) -> dict[str, object]:
     """Copia o estado e suas coleções mutáveis da entrevista."""
-    novo_estado = dict(state)
+    if isinstance(state, Mapping):
+        estado_materializado = dict(state)
+    else:
+        to_dict = getattr(state, "to_dict", None)
+        if not callable(to_dict):
+            raise TypeError("Estado da sessão não pode ser copiado com segurança.")
+        estado_materializado = to_dict()
+        if not isinstance(estado_materializado, Mapping):
+            raise TypeError("Estado da sessão não pode ser copiado com segurança.")
+        estado_materializado = dict(estado_materializado)
+
+    novo_estado = dict(estado_materializado)
     novo_estado[CREDIT_INTERVIEW_RESPONSES] = dict(
-        state.get(CREDIT_INTERVIEW_RESPONSES, {})
+        estado_materializado.get(CREDIT_INTERVIEW_RESPONSES, {})
     )
     novo_estado[CREDIT_INTERVIEW_ATTEMPTS] = dict(
-        state.get(CREDIT_INTERVIEW_ATTEMPTS, {})
+        estado_materializado.get(CREDIT_INTERVIEW_ATTEMPTS, {})
     )
     return novo_estado
 
